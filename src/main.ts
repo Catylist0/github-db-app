@@ -1,5 +1,6 @@
 import { storeToken, getToken, login, isAuthenticated } from './auth/github'
 import { readFile } from './storage/github'
+import { renderGraph } from './graph/renderer'
 import type { Graph } from './types'
 
 async function extractTokenFromHash(): Promise<void> {
@@ -21,6 +22,15 @@ async function fetchUsername(token: string): Promise<string> {
   return user.login
 }
 
+function showLogin(app: HTMLElement): void {
+  app.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center'
+  app.innerHTML = `
+    <p style="margin:0 0 1rem">Not logged in</p>
+    <button id="login-btn">Login with GitHub</button>
+  `
+  document.getElementById('login-btn')?.addEventListener('click', login)
+}
+
 async function render(): Promise<void> {
   const app = document.getElementById('app')
   if (!app) return
@@ -28,26 +38,29 @@ async function render(): Promise<void> {
   await extractTokenFromHash()
 
   if (!isAuthenticated()) {
-    app.innerHTML = `
-      <p>Not logged in</p>
-      <button id="login-btn">Login with GitHub</button>
-    `
-    document.getElementById('login-btn')?.addEventListener('click', login)
+    showLogin(app)
     return
   }
 
-  app.innerHTML = '<p>Loading...</p>'
+  app.style.cssText = ''
+  app.innerHTML = '<p style="padding:1rem;color:#e6edf3;font-family:system-ui">Loading...</p>'
+
   try {
     const [username, graph] = await Promise.all([
       fetchUsername(getToken()!),
       readFile('data/graph.json') as Promise<Graph>,
     ])
-    app.innerHTML = `
-      <p>Logged in as <strong>${username}</strong></p>
-      <p>Loaded graph: ${graph.nodes.length} nodes, ${graph.edges.length} edges</p>
-    `
+
+    renderGraph(graph, app)
+
+    const badge = document.createElement('div')
+    badge.style.cssText =
+      'position:fixed;top:1rem;right:1rem;background:#1f2937;border:1px solid #4b5563;' +
+      'padding:.35rem .75rem;border-radius:6px;color:#e6edf3;font-size:13px;font-family:system-ui'
+    badge.textContent = username
+    document.body.appendChild(badge)
   } catch (err) {
-    app.innerHTML = `<p>Error: ${err instanceof Error ? err.message : String(err)}</p>`
+    app.innerHTML = `<p style="padding:1rem;color:#e6edf3;font-family:system-ui">Error: ${err instanceof Error ? err.message : String(err)}</p>`
   }
 }
 
