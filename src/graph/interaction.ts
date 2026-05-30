@@ -72,6 +72,45 @@ export function addInteraction(
     }
   }
 
+  // ── Push button ───────────────────────────────────────────────────────────
+
+  const pushBtn = document.createElement('button')
+  pushBtn.textContent = 'Push'
+  pushBtn.style.cssText =
+    'position:fixed;bottom:1rem;right:1rem;background:#1f2937;border:1px solid #4b5563;' +
+    'padding:.35rem .75rem;border-radius:6px;color:#6b7280;font-size:13px;font-family:system-ui;' +
+    'cursor:not-allowed;opacity:0.5;transition:opacity .15s,border-color .15s,color .15s'
+  pushBtn.disabled = true
+  document.body.appendChild(pushBtn)
+
+  function markDirty(): void {
+    pushBtn.disabled = false
+    pushBtn.style.color = '#e6edf3'
+    pushBtn.style.borderColor = '#58a6ff'
+    pushBtn.style.cursor = 'pointer'
+    pushBtn.style.opacity = '1'
+  }
+
+  pushBtn.addEventListener('click', () => {
+    pushBtn.textContent = 'Pushing…'
+    pushBtn.disabled = true
+    onSave(graph)
+      .then(() => {
+        pushBtn.textContent = 'Push'
+        pushBtn.style.color = '#6b7280'
+        pushBtn.style.borderColor = '#4b5563'
+        pushBtn.style.cursor = 'not-allowed'
+        pushBtn.style.opacity = '0.5'
+      })
+      .catch((err: unknown) => {
+        pushBtn.textContent = 'Push (failed)'
+        pushBtn.disabled = false
+        pushBtn.style.color = '#f87171'
+        pushBtn.style.borderColor = '#f87171'
+        console.error(err)
+      })
+  })
+
   function toggleEdge(fromId: string, toId: string): void {
     const idx = graph.edges.findIndex(e => e.from === fromId && e.to === toId)
     if (idx >= 0) {
@@ -83,7 +122,7 @@ export function addInteraction(
       const firstNode = viewport.querySelector<SVGGElement>('[data-node-id]')
       viewport.insertBefore(path, firstNode)
     }
-    onSave(graph).catch(console.error)
+    markDirty()
   }
 
   // ── Pan ────────────────────────────────────────────────────────────────────
@@ -211,11 +250,11 @@ export function addInteraction(
     if (activeNode) {
       if (!hasDragged) {
         const nodeId = activeNode.dataset.nodeId!
-        if (e.ctrlKey && selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {
-          const fromId = [...selectedNodes][0]
-          toggleEdge(fromId, nodeId)
-          clearSelection()
-          selectNode(nodeId)
+        if (e.ctrlKey) {
+          if (selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {
+            toggleEdge([...selectedNodes][0], nodeId)
+          }
+          // Never touch selection while Ctrl is held
         } else {
           clearSelection()
           selectNode(nodeId)
