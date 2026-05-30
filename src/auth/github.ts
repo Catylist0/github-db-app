@@ -17,7 +17,7 @@ export function isAuthenticated(): boolean {
 export function login(): void {
   const url = new URL('https://github.com/login/oauth/authorize')
   url.searchParams.set('client_id', CLIENT_ID)
-  url.searchParams.set('scope', 'repo')
+  url.searchParams.set('scope', 'public_repo')
   window.location.href = url.toString()
 }
 
