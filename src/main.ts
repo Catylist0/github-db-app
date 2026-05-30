@@ -1,5 +1,5 @@
 import { storeToken, getToken, login, isAuthenticated } from './auth/github'
-import { readFile } from './storage/github'
+import { readFile, writeFile } from './storage/github'
 import { renderGraph } from './graph/renderer'
 import type { Graph } from './types'
 
@@ -51,7 +51,7 @@ async function render(): Promise<void> {
       readFile('data/graph.json') as Promise<Graph>,
     ])
 
-    renderGraph(graph, app)
+    renderGraph(graph, app, (g) => writeFile('data/graph.json', g, 'Update graph'))
 
     const badge = document.createElement('div')
     badge.style.cssText =

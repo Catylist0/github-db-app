@@ -1,50 +1,57 @@
 import type { Graph } from '../types'
+import { svgEl, makeEdgePath } from './utils'
 import { addInteraction } from './interaction'
 
-const NS = 'http://www.w3.org/2000/svg'
-
-function el<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementTagNameMap[K] {
-  return document.createElementNS(NS, tag) as SVGElementTagNameMap[K]
-}
-
-export function renderGraph(graph: Graph, container: HTMLElement): void {
+export function renderGraph(
+  graph: Graph,
+  container: HTMLElement,
+  onSave: (g: Graph) => Promise<void>,
+): void {
   container.innerHTML = ''
 
-  const svg = el('svg')
+  const svg = svgEl('svg')
   svg.setAttribute('width', '100%')
   svg.setAttribute('height', '100%')
   svg.style.display = 'block'
 
-  const viewport = el('g')
+  // Arrowhead marker
+  const defs = svgEl('defs')
+  const marker = svgEl('marker')
+  marker.id = 'arrowhead'
+  marker.setAttribute('markerWidth', '10')
+  marker.setAttribute('markerHeight', '7')
+  marker.setAttribute('refX', '10')
+  marker.setAttribute('refY', '3.5')
+  marker.setAttribute('orient', 'auto')
+  const arrowPoly = svgEl('polygon')
+  arrowPoly.setAttribute('points', '0 0, 10 3.5, 0 7')
+  arrowPoly.setAttribute('fill', '#444')
+  marker.appendChild(arrowPoly)
+  defs.appendChild(marker)
+  svg.appendChild(defs)
+
+  const viewport = svgEl('g')
   viewport.id = 'viewport'
   svg.appendChild(viewport)
 
   // Edges — drawn first so they sit behind nodes
+  const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
   for (const edge of graph.edges) {
-    const from = graph.nodes.find(n => n.id === edge.from)!
-    const to = graph.nodes.find(n => n.id === edge.to)!
-    const line = el('line')
-    line.setAttribute('x1', String(from.x))
-    line.setAttribute('y1', String(from.y))
-    line.setAttribute('x2', String(to.x))
-    line.setAttribute('y2', String(to.y))
-    line.setAttribute('stroke', '#444')
-    line.setAttribute('stroke-width', '2')
-    line.dataset.from = edge.from
-    line.dataset.to = edge.to
-    viewport.appendChild(line)
+    const from = nodeMap.get(edge.from)!
+    const to = nodeMap.get(edge.to)!
+    viewport.appendChild(makeEdgePath(from, to, edge.from, edge.to))
   }
 
   // Nodes
   for (const node of graph.nodes) {
-    const g = el('g')
+    const g = svgEl('g')
     g.dataset.nodeId = node.id
     g.dataset.cx = String(node.x)
     g.dataset.cy = String(node.y)
     g.setAttribute('transform', `translate(${node.x - 60},${node.y - 20})`)
     g.style.cursor = 'grab'
 
-    const rect = el('rect')
+    const rect = svgEl('rect')
     rect.setAttribute('width', '120')
     rect.setAttribute('height', '40')
     rect.setAttribute('rx', '8')
@@ -52,7 +59,7 @@ export function renderGraph(graph: Graph, container: HTMLElement): void {
     rect.setAttribute('stroke', '#4b5563')
     rect.setAttribute('stroke-width', '1.5')
 
-    const text = el('text')
+    const text = svgEl('text')
     text.setAttribute('x', '60')
     text.setAttribute('y', '20')
     text.setAttribute('text-anchor', 'middle')
@@ -69,5 +76,5 @@ export function renderGraph(graph: Graph, container: HTMLElement): void {
   }
 
   container.appendChild(svg)
-  addInteraction(svg, viewport)
+  addInteraction(svg, viewport, graph, onSave)
 }
