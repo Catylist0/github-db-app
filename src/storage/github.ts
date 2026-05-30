@@ -1,42 +1,14 @@
 import { getToken } from '../auth/github'
 
+const RAW_BASE = 'https://raw.githubusercontent.com/Catylist0/github-db-app/main'
 const API_BASE = 'https://api.github.com'
-
-interface RepoConfig {
-  owner: string
-  repo: string
-}
-
-let _config: RepoConfig | null = null
-
-export function configureStorage(owner: string, repo: string): void {
-  _config = { owner, repo }
-}
-
-function cfg(): RepoConfig {
-  if (!_config) throw new Error('Storage not configured — call configureStorage() first')
-  return _config
-}
-
-function authHeaders(): HeadersInit {
-  const token = getToken()
-  if (!token) throw new Error('Not authenticated')
-  return {
-    Authorization: `Bearer ${token}`,
-    Accept: 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28',
-  }
-}
+const OWNER = 'Catylist0'
+const REPO = 'github-db-app'
 
 export async function readFile(path: string): Promise<unknown> {
-  const { owner, repo } = cfg()
-  const res = await fetch(`${API_BASE}/repos/${owner}/${repo}/contents/${path}`, {
-    headers: authHeaders(),
-  })
+  const res = await fetch(`${RAW_BASE}/${path}`)
   if (!res.ok) throw new Error(`readFile ${path}: ${res.status} ${res.statusText}`)
-  const item = await res.json() as { content: string }
-  const decoded = atob(item.content.replace(/\n/g, ''))
-  return JSON.parse(decoded)
+  return res.json()
 }
 
 export async function writeFile(
@@ -44,14 +16,17 @@ export async function writeFile(
   data: unknown,
   message: string,
 ): Promise<void> {
-  const { owner, repo } = cfg()
-  const headers = authHeaders() as Record<string, string>
+  const token = getToken()
+  if (!token) throw new Error('Not authenticated')
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json',
+  }
 
-  // Fetch current SHA if the file already exists
   let sha: string | undefined
-  const existing = await fetch(`${API_BASE}/repos/${owner}/${repo}/contents/${path}`, {
-    headers,
-  })
+  const existing = await fetch(`${API_BASE}/repos/${OWNER}/${REPO}/contents/${path}`, { headers })
   if (existing.ok) {
     const item = await existing.json() as { sha: string }
     sha = item.sha
@@ -63,9 +38,9 @@ export async function writeFile(
   const body: Record<string, unknown> = { message, content }
   if (sha) body.sha = sha
 
-  const res = await fetch(`${API_BASE}/repos/${owner}/${repo}/contents/${path}`, {
+  const res = await fetch(`${API_BASE}/repos/${OWNER}/${REPO}/contents/${path}`, {
     method: 'PUT',
-    headers: { ...headers, 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`writeFile ${path}: ${res.status} ${res.statusText}`)

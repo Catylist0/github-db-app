@@ -1,24 +1,16 @@
 export interface Node {
   id: string
   label: string
-  data: Record<string, unknown>
-  createdAt: string
-  updatedAt: string
+  x: number
+  y: number
 }
 
 export interface Edge {
-  id: string
-  source: string
-  target: string
-  label?: string
+  from: string
+  to: string
 }
 
-export interface Project {
-  id: string
-  name: string
-  description?: string
+export interface Graph {
   nodes: Node[]
   edges: Edge[]
-  createdAt: string
-  updatedAt: string
 }

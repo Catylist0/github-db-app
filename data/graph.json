@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    { "id": "1", "label": "Project Alpha", "x": 400, "y": 300 },
+    { "id": "2", "label": "Design", "x": 200, "y": 150 },
+    { "id": "3", "label": "Frontend", "x": 400, "y": 150 },
+    { "id": "4", "label": "Backend", "x": 600, "y": 150 },
+    { "id": "5", "label": "Wireframes", "x": 100, "y": 50 },
+    { "id": "6", "label": "Components", "x": 400, "y": 50 }
+  ],
+  "edges": [
+    { "from": "1", "to": "2" },
+    { "from": "1", "to": "3" },
+    { "from": "1", "to": "4" },
+    { "from": "2", "to": "5" },
+    { "from": "3", "to": "6" }
+  ]
+}
