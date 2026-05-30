@@ -1,28 +1,26 @@
-// GitHub OAuth flow using the device flow or a proxy server.
-// Stub — to be implemented once a backend proxy or GitHub App is configured.
+const CLIENT_ID = 'Ov23liyv0Lgo9rQNB1fU'
 
-export interface AuthState {
-  token: string | null
-  username: string | null
+let _token: string | null = null
+
+export function storeToken(token: string): void {
+  _token = token
 }
 
-export function getAuthState(): AuthState {
-  return {
-    token: localStorage.getItem('gh_token'),
-    username: localStorage.getItem('gh_username'),
-  }
+export function getToken(): string | null {
+  return _token
 }
 
 export function isAuthenticated(): boolean {
-  return Boolean(getAuthState().token)
+  return _token !== null
 }
 
-export async function initiateLogin(): Promise<void> {
-  // TODO: implement OAuth device flow or redirect to proxy
-  throw new Error('Auth not yet configured')
+export function login(): void {
+  const url = new URL('https://github.com/login/oauth/authorize')
+  url.searchParams.set('client_id', CLIENT_ID)
+  url.searchParams.set('scope', 'repo')
+  window.location.href = url.toString()
 }
 
 export function logout(): void {
-  localStorage.removeItem('gh_token')
-  localStorage.removeItem('gh_username')
+  _token = null
 }
