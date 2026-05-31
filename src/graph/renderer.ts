@@ -1,5 +1,5 @@
 import type { Graph, GraphAPI } from '../types'
-import { svgEl, makeEdgePath } from './utils'
+import { svgEl, makeEdgePath, makeNodeEl } from './utils'
 import { addInteraction } from './interaction'
 
 export function renderGraph(
@@ -44,35 +44,7 @@ export function renderGraph(
 
   // Nodes
   for (const node of graph.nodes) {
-    const g = svgEl('g')
-    g.dataset.nodeId = node.id
-    g.dataset.cx = String(node.x)
-    g.dataset.cy = String(node.y)
-    g.setAttribute('transform', `translate(${node.x - 60},${node.y - 20})`)
-    g.style.cursor = 'grab'
-
-    const rect = svgEl('rect')
-    rect.setAttribute('width', '120')
-    rect.setAttribute('height', '40')
-    rect.setAttribute('rx', '8')
-    rect.setAttribute('fill', '#1f2937')
-    rect.setAttribute('stroke', '#4b5563')
-    rect.setAttribute('stroke-width', '1.5')
-
-    const text = svgEl('text')
-    text.setAttribute('x', '60')
-    text.setAttribute('y', '20')
-    text.setAttribute('text-anchor', 'middle')
-    text.setAttribute('dominant-baseline', 'middle')
-    text.setAttribute('fill', '#e6edf3')
-    text.setAttribute('font-size', '13')
-    text.setAttribute('font-family', 'system-ui')
-    text.setAttribute('pointer-events', 'none')
-    text.textContent = node.label
-
-    g.appendChild(rect)
-    g.appendChild(text)
-    viewport.appendChild(g)
+    viewport.appendChild(makeNodeEl(node))
   }
 
   container.appendChild(svg)

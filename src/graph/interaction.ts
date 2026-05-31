@@ -1,5 +1,5 @@
-import type { Graph, GraphAPI } from '../types'
-import { svgEl, edgeEndpoint, makeEdgePath } from './utils'
+import type { Graph, GraphAPI, Node } from '../types'
+import { svgEl, edgeEndpoint, makeEdgePath, makeNodeEl } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
 
 const DRAG_THRESHOLD = 4
@@ -89,6 +89,77 @@ export function addInteraction(
     }
   }
 
+  // ── Panel helpers ──────────────────────────────────────────────────────────
+
+  function handleDeleteNode(id: string): void {
+    api.deleteNode(id).catch(console.error)
+    hidePanel()
+    const idx = graph.nodes.findIndex(n => n.id === id)
+    if (idx >= 0) graph.nodes.splice(idx, 1)
+    graph.edges = graph.edges.filter(e => e.from !== id && e.to !== id)
+    viewport.querySelector(`[data-node-id="${id}"]`)?.remove()
+    viewport.querySelectorAll<SVGPathElement>(`[data-from="${id}"],[data-to="${id}"]`)
+      .forEach(p => p.remove())
+    clearSelection()
+  }
+
+  function openPanel(node: Node): void {
+    const id = node.id
+    showPanel(node, (updated) => {
+      Object.assign(node, updated)
+      if (updated.label !== undefined) {
+        const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
+        if (textEl) textEl.textContent = updated.label
+      }
+      api.upsertNode(node).catch(console.error)
+    }, clearSelection, () => handleDeleteNode(id))
+  }
+
+  // ── Add-node mode ─────────────────────────────────────────────────────────
+
+  let addMode = false
+
+  const addBtn = document.createElement('button')
+  addBtn.textContent = '+'
+  addBtn.title = 'Add node'
+  addBtn.style.cssText =
+    'position:fixed;bottom:1rem;left:1rem;width:2rem;height:2rem;' +
+    'background:#1f2937;border:1px solid #4b5563;border-radius:6px;' +
+    'color:#e6edf3;font-size:1.3rem;line-height:1;font-family:system-ui;' +
+    'cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;'
+  document.body.appendChild(addBtn)
+
+  function setAddMode(active: boolean): void {
+    addMode = active
+    addBtn.style.borderColor = active ? SELECTED_STROKE : '#4b5563'
+    addBtn.style.color = active ? SELECTED_STROKE : '#e6edf3'
+    svg.style.cursor = active ? 'crosshair' : ''
+  }
+
+  addBtn.addEventListener('click', () => setAddMode(!addMode))
+
+  let pendingAddPos: { x: number; y: number } | null = null
+  let pendingAddClientStart = { x: 0, y: 0 }
+
+  function createNodeAt(vp: { x: number; y: number }, shiftHeld: boolean): void {
+    const node: Node = {
+      id: crypto.randomUUID(),
+      label: 'Unnamed',
+      x: Math.round(vp.x),
+      y: Math.round(vp.y),
+    }
+    graph.nodes.push(node)
+    viewport.appendChild(makeNodeEl(node))
+    api.upsertNode(node).catch(console.error)
+
+    if (!shiftHeld) {
+      setAddMode(false)
+      clearSelection()
+      selectNode(node.id)
+      openPanel(node)
+    }
+  }
+
   // ── Pan ────────────────────────────────────────────────────────────────────
 
   let panning = false
@@ -150,6 +221,9 @@ export function addInteraction(
       boxEl.setAttribute('stroke-dasharray', String(4 / state.scale))
       boxEl.setAttribute('pointer-events', 'none')
       viewport.appendChild(boxEl)
+    } else if (addMode) {
+      pendingAddPos = clientToViewport(me.clientX, me.clientY)
+      pendingAddClientStart = { x: me.clientX, y: me.clientY }
     } else {
       hidePanel()
       panning = true
@@ -212,7 +286,6 @@ export function addInteraction(
   window.addEventListener('mouseup', (e: MouseEvent) => {
     if (activeNode) {
       if (hasDragged) {
-        // Persist new positions for every moved node
         const moved = isMultiDrag ? [...multiDragOrigins.keys()] : [activeNode.dataset.nodeId!]
         for (const id of moved) {
           const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
@@ -233,20 +306,23 @@ export function addInteraction(
           clearSelection()
           selectNode(nodeId)
           const node = graph.nodes.find(n => n.id === nodeId)!
-          showPanel(node, (updated) => {
-            Object.assign(node, updated)
-            if (updated.label !== undefined) {
-              const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${nodeId}"] text`)
-              if (textEl) textEl.textContent = updated.label
-            }
-            api.upsertNode(node).catch(console.error)
-          }, clearSelection)
+          openPanel(node)
         }
       }
       activeNode.style.cursor = 'grab'
       activeNode = null
       isMultiDrag = false
       hasDragged = false
+      return
+    }
+
+    if (pendingAddPos) {
+      const dx = e.clientX - pendingAddClientStart.x
+      const dy = e.clientY - pendingAddClientStart.y
+      if (Math.sqrt(dx * dx + dy * dy) <= DRAG_THRESHOLD) {
+        createNodeAt(pendingAddPos, e.shiftKey)
+      }
+      pendingAddPos = null
       return
     }
 
@@ -273,7 +349,7 @@ export function addInteraction(
 
     if (panning) {
       panning = false
-      svg.style.cursor = ''
+      svg.style.cursor = addMode ? 'crosshair' : ''
     }
   })
 

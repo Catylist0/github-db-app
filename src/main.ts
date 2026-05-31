@@ -1,5 +1,5 @@
 import { storeToken, getToken, login, isAuthenticated } from './auth/github'
-import { loadGraph, upsertNode, upsertEdge, deleteEdge } from './storage/api'
+import { loadGraph, upsertNode, deleteNode, upsertEdge, deleteEdge } from './storage/api'
 import { renderGraph } from './graph/renderer'
 
 async function extractTokenFromHash(): Promise<void> {
@@ -50,7 +50,7 @@ async function render(): Promise<void> {
       loadGraph(),
     ])
 
-    renderGraph(graph, app, { upsertNode, upsertEdge, deleteEdge })
+    renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge })
 
     const badge = document.createElement('div')
     badge.style.cssText =

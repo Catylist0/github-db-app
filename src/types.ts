@@ -19,6 +19,7 @@ export interface Graph {
 
 export interface GraphAPI {
   upsertNode: (node: Node) => Promise<void>
+  deleteNode: (id: string) => Promise<void>
   upsertEdge: (edge: Edge) => Promise<void>
   deleteEdge: (id: string) => Promise<void>
 }

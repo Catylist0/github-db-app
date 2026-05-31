@@ -52,6 +52,7 @@ export function showPanel(
   node: Node,
   onUpdate: (updated: Partial<Node>) => void,
   onClose?: () => void,
+  onDelete?: () => void,
 ): void {
   const wasOpen = !!document.getElementById('detail-panel')
   hidePanel(true)
@@ -202,4 +203,22 @@ export function showPanel(
   descWrap.appendChild(textarea)
   descWrap.appendChild(rendered)
   body.appendChild(descWrap)
+
+  // ── Delete button ─────────────────────────────────────────────────────────
+  if (onDelete) {
+    const deleteBtn = document.createElement('button')
+    deleteBtn.textContent = 'Delete node'
+    deleteBtn.style.cssText =
+      'flex-shrink:0;background:#da3633;border:none;border-radius:6px;' +
+      'padding:.5rem .75rem;color:#fff;font-size:.85rem;font-family:system-ui;' +
+      'cursor:pointer;width:100%;'
+    deleteBtn.addEventListener('mouseenter', () => { deleteBtn.style.opacity = '0.85' })
+    deleteBtn.addEventListener('mouseleave', () => { deleteBtn.style.opacity = '1' })
+    deleteBtn.addEventListener('click', () => {
+      if (confirm(`Delete '${node.label}' and all its connections? This cannot be undone.`)) {
+        onDelete()
+      }
+    })
+    body.appendChild(deleteBtn)
+  }
 }
