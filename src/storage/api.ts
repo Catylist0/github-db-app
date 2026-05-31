@@ -13,7 +13,10 @@ async function apiFetch(path: string, init?: RequestInit): Promise<unknown> {
     ...init,
     headers: { ...authHeaders(), ...((init?.headers as Record<string, string>) ?? {}) },
   })
-  if (!res.ok) throw new Error(`${init?.method ?? 'GET'} ${path}: ${res.status} ${res.statusText}`)
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`${init?.method ?? 'GET'} ${path}: ${res.status}${body ? ` — ${body}` : ''}`)
+  }
   return res.json()
 }
 
