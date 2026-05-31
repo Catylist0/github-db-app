@@ -220,6 +220,13 @@ export function showPanel(
 
   body.appendChild(descWrap)
 
+  // ── Footer (always visible, never scrolls) ────────────────────────────────
+  const footer = document.createElement('div')
+  footer.style.cssText =
+    'flex-shrink:0;display:flex;flex-direction:column;gap:.5rem;' +
+    'padding:.75rem 1.25rem;border-top:1px solid #30363d;'
+  panel.appendChild(footer)
+
   // ── Status buttons ────────────────────────────────────────────────────────
   const statusDefs: Array<{ value: NodeStatus; label: string; color: string }> = [
     { value: 'planned',  label: 'Planned',  color: '#4b5563' },
@@ -228,7 +235,7 @@ export function showPanel(
   ]
 
   const statusWrap = document.createElement('div')
-  statusWrap.style.cssText = 'display:flex;gap:.4rem;flex-shrink:0;'
+  statusWrap.style.cssText = 'display:flex;gap:.4rem;'
 
   let currentStatus: NodeStatus = node.status
   const statusBtns: HTMLButtonElement[] = []
@@ -264,14 +271,14 @@ export function showPanel(
   }
 
   applyStatusHighlight()
-  body.appendChild(statusWrap)
+  footer.appendChild(statusWrap)
 
   // ── Delete button (edit mode only) ────────────────────────────────────────
   if (!readonly && onDelete) {
     const deleteBtn = document.createElement('button')
     deleteBtn.textContent = 'Delete node'
     deleteBtn.style.cssText =
-      'flex-shrink:0;background:#da3633;border:none;border-radius:6px;' +
+      'background:#da3633;border:none;border-radius:6px;' +
       'padding:.5rem .75rem;color:#fff;font-size:.85rem;font-family:system-ui;' +
       'cursor:pointer;width:100%;'
     deleteBtn.addEventListener('mouseenter', () => { deleteBtn.style.opacity = '0.85' })
@@ -281,6 +288,6 @@ export function showPanel(
         onDelete()
       }
     })
-    body.appendChild(deleteBtn)
+    footer.appendChild(deleteBtn)
   }
 }
