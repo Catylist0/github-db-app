@@ -23,13 +23,35 @@ export function edgeEndpoint(fx: number, fy: number, tx: number, ty: number): { 
   return { x: tx + t * ux, y: ty + t * uy }
 }
 
+export function nodeIsReady(node: Node, edges: Edge[], nodeMap: Map<string, Node>): boolean {
+  if (node.status !== 'planned') return false
+  return edges
+    .filter(e => e.to === node.id)
+    .every(e => nodeMap.get(e.from)?.status === 'complete')
+}
+
 export function nodeBorderColor(node: Node, edges: Edge[], nodeMap: Map<string, Node>): string {
   if (node.status === 'ongoing') return '#f97316'
   if (node.status === 'complete') return '#22c55e'
-  const allIncomingComplete = edges
-    .filter(e => e.to === node.id)
-    .every(e => nodeMap.get(e.from)?.status === 'complete')
-  return allIncomingComplete ? '#e6edf3' : '#4b5563'
+  return nodeIsReady(node, edges, nodeMap) ? '#e6edf3' : '#4b5563'
+}
+
+export function setPulse(rect: SVGRectElement, active: boolean): void {
+  const existing = rect.querySelector('animate')
+  if (active && !existing) {
+    const anim = svgEl('animate')
+    anim.setAttribute('attributeName', 'stroke-width')
+    anim.setAttribute('values', '1.5;3;1.5')
+    anim.setAttribute('dur', '1s')
+    anim.setAttribute('repeatCount', 'indefinite')
+    anim.setAttribute('calcMode', 'spline')
+    anim.setAttribute('keyTimes', '0;0.5;1')
+    anim.setAttribute('keySplines', '0.5 0 0.5 1;0.5 0 0.5 1')
+    rect.appendChild(anim)
+  } else if (!active && existing) {
+    existing.remove()
+    rect.setAttribute('stroke-width', '1.5')
+  }
 }
 
 export function makeEdgePath(
@@ -51,7 +73,7 @@ export function makeEdgePath(
   return path
 }
 
-export function makeNodeEl(node: Node, borderColor = '#4b5563'): SVGGElement {
+export function makeNodeEl(node: Node, borderColor = '#4b5563', pulse = false): SVGGElement {
   const g = svgEl('g')
   g.dataset.nodeId = node.id
   g.dataset.cx = String(node.x)
@@ -78,6 +100,8 @@ export function makeNodeEl(node: Node, borderColor = '#4b5563'): SVGGElement {
   text.setAttribute('pointer-events', 'none')
   text.style.userSelect = 'none'
   text.textContent = node.label
+
+  if (pulse) setPulse(rect, true)
 
   g.appendChild(rect)
   g.appendChild(text)

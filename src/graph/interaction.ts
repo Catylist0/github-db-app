@@ -1,5 +1,5 @@
 import type { Graph, GraphAPI, Node } from '../types'
-import { svgEl, edgeEndpoint, makeEdgePath, makeNodeEl, nodeBorderColor } from './utils'
+import { svgEl, edgeEndpoint, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady, setPulse } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
 
 const DRAG_THRESHOLD = 4
@@ -42,7 +42,11 @@ export function addInteraction(
   function selectNode(id: string): void {
     selectedNodes.add(id)
     const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
-    if (g) nodeRect(g).setAttribute('stroke', SELECTED_STROKE)
+    if (g) {
+      const rect = nodeRect(g)
+      setPulse(rect, false)
+      rect.setAttribute('stroke', SELECTED_STROKE)
+    }
   }
 
   function computedBorder(nodeId: string): string {
@@ -57,14 +61,24 @@ export function addInteraction(
     for (const node of graph.nodes) {
       if (selectedNodes.has(node.id)) continue
       const g = viewport.querySelector<SVGGElement>(`[data-node-id="${node.id}"]`)
-      if (g) nodeRect(g).setAttribute('stroke', nodeBorderColor(node, graph.edges, nodeMap))
+      if (!g) continue
+      const rect = nodeRect(g)
+      rect.setAttribute('stroke', nodeBorderColor(node, graph.edges, nodeMap))
+      setPulse(rect, nodeIsReady(node, graph.edges, nodeMap))
     }
   }
 
   function deselectNode(id: string): void {
     selectedNodes.delete(id)
     const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
-    if (g) nodeRect(g).setAttribute('stroke', computedBorder(id))
+    if (!g) return
+    const rect = nodeRect(g)
+    rect.setAttribute('stroke', computedBorder(id))
+    const node = graph.nodes.find(n => n.id === id)
+    if (node) {
+      const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
+      setPulse(rect, nodeIsReady(node, graph.edges, nodeMap))
+    }
   }
 
   function clearSelection(): void {
@@ -194,7 +208,7 @@ export function addInteraction(
     }
     graph.nodes.push(node)
     const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
-    viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap)))
+    viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)))
     api.upsertNode(node).catch(console.error)
 
     if (!shiftHeld) {

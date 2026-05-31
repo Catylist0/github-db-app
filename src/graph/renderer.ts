@@ -1,5 +1,5 @@
 import type { Graph, GraphAPI } from '../types'
-import { svgEl, makeEdgePath, makeNodeEl, nodeBorderColor } from './utils'
+import { svgEl, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady } from './utils'
 import { addInteraction } from './interaction'
 
 export function renderGraph(
@@ -44,7 +44,7 @@ export function renderGraph(
 
   // Nodes
   for (const node of graph.nodes) {
-    viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap)))
+    viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)))
   }
 
   container.appendChild(svg)
