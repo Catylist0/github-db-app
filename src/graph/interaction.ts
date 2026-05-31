@@ -120,6 +120,7 @@ export function addInteraction(
   // ── Add-node mode ─────────────────────────────────────────────────────────
 
   let addMode = false
+  let addModeDocListener: ((e: MouseEvent) => void) | null = null
 
   const addBtn = document.createElement('button')
   addBtn.textContent = '+'
@@ -136,6 +137,19 @@ export function addInteraction(
     addBtn.style.borderColor = active ? SELECTED_STROKE : '#4b5563'
     addBtn.style.color = active ? SELECTED_STROKE : '#e6edf3'
     svg.style.cursor = active ? 'crosshair' : ''
+
+    if (active && !addModeDocListener) {
+      addModeDocListener = (e: MouseEvent) => {
+        const t = e.target as Element
+        // ignore clicks on the SVG canvas (handled there) and on the toggle button itself
+        if (svg.contains(t) || addBtn.contains(t)) return
+        setAddMode(false)
+      }
+      document.addEventListener('mousedown', addModeDocListener)
+    } else if (!active && addModeDocListener) {
+      document.removeEventListener('mousedown', addModeDocListener)
+      addModeDocListener = null
+    }
   }
 
   addBtn.addEventListener('click', () => setAddMode(!addMode))
@@ -192,6 +206,7 @@ export function addInteraction(
     const nodeG = (me.target as Element).closest<SVGGElement>('[data-node-id]')
 
     if (nodeG) {
+      setAddMode(false)
       activeNode = nodeG
       hasDragged = false
       dragClientStart = { x: me.clientX, y: me.clientY }
