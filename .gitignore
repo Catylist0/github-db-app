@@ -5,5 +5,4 @@ dist/
 .env.*.local
 *.log
 .DS_Store
-data/graph.json
-data/users/
+data/

@@ -1,4 +1,4 @@
-import type { Graph } from '../types'
+import type { Graph, GraphAPI } from '../types'
 import { svgEl, edgeEndpoint, makeEdgePath } from './utils'
 
 const DRAG_THRESHOLD = 4
@@ -9,7 +9,7 @@ export function addInteraction(
   svg: SVGSVGElement,
   viewport: SVGGElement,
   graph: Graph,
-  onSave: (g: Graph) => Promise<void>,
+  api: GraphAPI,
 ): void {
   const state = { tx: 0, ty: 0, scale: 1 }
 
@@ -72,65 +72,20 @@ export function addInteraction(
     }
   }
 
-  // ── Push button ───────────────────────────────────────────────────────────
-
-  const pushBtn = document.createElement('button')
-  pushBtn.textContent = 'Push'
-  pushBtn.style.cssText =
-    'position:fixed;bottom:1rem;right:1rem;background:#1f2937;border:1px solid #4b5563;' +
-    'padding:.35rem .75rem;border-radius:6px;color:#6b7280;font-size:13px;font-family:system-ui;' +
-    'cursor:not-allowed;opacity:0.5;transition:opacity .15s,border-color .15s,color .15s'
-  pushBtn.disabled = true
-  document.body.appendChild(pushBtn)
-
-  function markDirty(): void {
-    pushBtn.disabled = false
-    pushBtn.style.color = '#e6edf3'
-    pushBtn.style.borderColor = '#58a6ff'
-    pushBtn.style.cursor = 'pointer'
-    pushBtn.style.opacity = '1'
-  }
-
-  function syncNodePositions(): void {
-    for (const g of viewport.querySelectorAll<SVGGElement>('[data-node-id]')) {
-      const node = graph.nodes.find(n => n.id === g.dataset.nodeId)
-      if (node) { node.x = Number(g.dataset.cx); node.y = Number(g.dataset.cy) }
-    }
-  }
-
-  pushBtn.addEventListener('click', () => {
-    syncNodePositions()
-    pushBtn.textContent = 'Pushing…'
-    pushBtn.disabled = true
-    onSave(graph)
-      .then(() => {
-        pushBtn.textContent = 'Push'
-        pushBtn.style.color = '#6b7280'
-        pushBtn.style.borderColor = '#4b5563'
-        pushBtn.style.cursor = 'not-allowed'
-        pushBtn.style.opacity = '0.5'
-      })
-      .catch((err: unknown) => {
-        pushBtn.textContent = 'Push (failed)'
-        pushBtn.disabled = false
-        pushBtn.style.color = '#f87171'
-        pushBtn.style.borderColor = '#f87171'
-        console.error(err)
-      })
-  })
-
   function toggleEdge(fromId: string, toId: string): void {
-    const idx = graph.edges.findIndex(e => e.from === fromId && e.to === toId)
-    if (idx >= 0) {
-      graph.edges.splice(idx, 1)
+    const existingIdx = graph.edges.findIndex(e => e.from === fromId && e.to === toId)
+    if (existingIdx >= 0) {
+      const [removed] = graph.edges.splice(existingIdx, 1)
       viewport.querySelector(`[data-from="${fromId}"][data-to="${toId}"]`)?.remove()
+      api.deleteEdge(removed.id).catch(console.error)
     } else {
-      graph.edges.push({ from: fromId, to: toId })
+      const edge = { id: `${fromId}-${toId}`, from: fromId, to: toId }
+      graph.edges.push(edge)
       const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId)
       const firstNode = viewport.querySelector<SVGGElement>('[data-node-id]')
       viewport.insertBefore(path, firstNode)
+      api.upsertEdge(edge).catch(console.error)
     }
-    markDirty()
   }
 
   // ── Pan ────────────────────────────────────────────────────────────────────
@@ -181,7 +136,6 @@ export function addInteraction(
     }
 
     if (me.shiftKey) {
-      // Box select
       boxSelecting = true
       boxVpStart = clientToViewport(me.clientX, me.clientY)
       boxEl = svgEl('rect')
@@ -196,7 +150,6 @@ export function addInteraction(
       boxEl.setAttribute('pointer-events', 'none')
       viewport.appendChild(boxEl)
     } else {
-      // Pan
       panning = true
       panStart = { x: me.clientX, y: me.clientY }
       panOrigin = { tx: state.tx, ty: state.ty }
@@ -257,14 +210,23 @@ export function addInteraction(
   window.addEventListener('mouseup', (e: MouseEvent) => {
     if (activeNode) {
       if (hasDragged) {
-        markDirty()
+        // Persist new positions for every moved node
+        const moved = isMultiDrag ? [...multiDragOrigins.keys()] : [activeNode.dataset.nodeId!]
+        for (const id of moved) {
+          const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
+          const node = graph.nodes.find(n => n.id === id)
+          if (node) {
+            node.x = Number(g.dataset.cx)
+            node.y = Number(g.dataset.cy)
+            api.upsertNode(node).catch(console.error)
+          }
+        }
       } else {
         const nodeId = activeNode.dataset.nodeId!
         if (e.ctrlKey) {
           if (selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {
             toggleEdge([...selectedNodes][0], nodeId)
           }
-          // Never touch selection while Ctrl is held
         } else {
           clearSelection()
           selectNode(nodeId)
@@ -304,7 +266,6 @@ export function addInteraction(
     }
   })
 
-  // Zoom toward cursor
   svg.addEventListener('wheel', (e: Event) => {
     const we = e as WheelEvent
     we.preventDefault()

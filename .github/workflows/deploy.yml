@@ -5,8 +5,7 @@ on:
     branches:
       - main
     paths-ignore:
-      - 'data/graph.json'
-      - 'data/users/**'
+      - 'data/**'
 
 permissions:
   contents: read

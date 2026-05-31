@@ -1,11 +1,11 @@
-import type { Graph } from '../types'
+import type { Graph, GraphAPI } from '../types'
 import { svgEl, makeEdgePath } from './utils'
 import { addInteraction } from './interaction'
 
 export function renderGraph(
   graph: Graph,
   container: HTMLElement,
-  onSave: (g: Graph) => Promise<void>,
+  api: GraphAPI,
 ): void {
   container.innerHTML = ''
 
@@ -76,5 +76,5 @@ export function renderGraph(
   }
 
   container.appendChild(svg)
-  addInteraction(svg, viewport, graph, onSave)
+  addInteraction(svg, viewport, graph, api)
 }
