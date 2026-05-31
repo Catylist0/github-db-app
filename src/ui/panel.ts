@@ -53,6 +53,7 @@ export function showPanel(
   onUpdate: (updated: Partial<Node>) => void,
   onClose?: () => void,
 ): void {
+  const wasOpen = !!document.getElementById('detail-panel')
   hidePanel(true)
   injectStyles()
   pendingClose = onClose
@@ -61,14 +62,19 @@ export function showPanel(
   const panel = document.createElement('div')
   panel.id = 'detail-panel'
   panel.style.cssText =
-    'position:fixed;top:0;right:0;width:320px;height:100vh;overflow-y:auto;' +
+    'position:fixed;top:0;right:0;width:320px;height:100vh;overflow:hidden;' +
     'background:#161b22;border-left:1px solid #30363d;z-index:1000;' +
-    'box-sizing:border-box;font-family:system-ui;' +
+    'box-sizing:border-box;font-family:system-ui;display:flex;flex-direction:column;' +
     'transform:translateX(320px);transition:transform .2s ease;'
   document.body.appendChild(panel)
-  requestAnimationFrame(() => requestAnimationFrame(() => {
+  // Skip animation when switching between nodes — only slide in from closed
+  if (wasOpen) {
     panel.style.transform = 'translateX(0)'
-  }))
+  } else {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      panel.style.transform = 'translateX(0)'
+    }))
+  }
 
   // ── Close button ──────────────────────────────────────────────────────────
   const closeBtn = document.createElement('button')
@@ -88,7 +94,9 @@ export function showPanel(
 
   // ── Content ───────────────────────────────────────────────────────────────
   const body = document.createElement('div')
-  body.style.cssText = 'padding:1rem 1.25rem;display:flex;flex-direction:column;gap:1.1rem;'
+  body.style.cssText =
+    'padding:1rem 1.25rem;display:flex;flex-direction:column;gap:1.1rem;' +
+    'flex:1;min-height:0;overflow-y:auto;'
   panel.appendChild(body)
 
   function sectionLabel(text: string): HTMLElement {
@@ -109,6 +117,7 @@ export function showPanel(
   // ── Name ──────────────────────────────────────────────────────────────────
   const nameWrap = fieldWrap()
   nameWrap.style.marginTop = '.4rem'
+  nameWrap.style.flexShrink = '0'
   nameWrap.appendChild(sectionLabel('Name'))
 
   const labelInput = document.createElement('input')
@@ -132,23 +141,25 @@ export function showPanel(
 
   // ── Description ───────────────────────────────────────────────────────────
   const descWrap = fieldWrap()
+  descWrap.style.flex = '1'
+  descWrap.style.minHeight = '0'
   descWrap.appendChild(sectionLabel('Description'))
 
   const sharedFieldStyle =
     'background:#0d1117;border:1px solid #30363d;border-radius:6px;' +
-    'padding:.45rem .65rem;box-sizing:border-box;width:100%;min-height:140px;' +
-    'font-size:.8rem;line-height:1.55;outline:none;'
+    'padding:.45rem .65rem;box-sizing:border-box;width:100%;' +
+    'font-size:.8rem;line-height:1.55;outline:none;flex:1;min-height:0;'
 
   const textarea = document.createElement('textarea')
   textarea.value = node.description ?? ''
   textarea.placeholder = 'Add a description… (markdown supported)'
   textarea.style.cssText =
-    sharedFieldStyle + 'color:#e6edf3;font-family:monospace;resize:vertical;'
+    sharedFieldStyle + 'color:#e6edf3;font-family:monospace;resize:none;'
 
   const rendered = document.createElement('div')
   rendered.id = 'panel-desc-rendered'
   rendered.style.cssText =
-    sharedFieldStyle + 'color:#c9d1d9;cursor:text;word-break:break-word;display:none;'
+    sharedFieldStyle + 'color:#c9d1d9;cursor:text;word-break:break-word;overflow-y:auto;display:none;'
 
   const PLACEHOLDER_HTML = '<span style="color:#484f58;font-style:italic">Click to add a description…</span>'
 
