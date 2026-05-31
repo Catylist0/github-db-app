@@ -6,7 +6,7 @@ export function renderGraph(
   graph: Graph,
   container: HTMLElement,
   api: GraphAPI,
-): { setAuthenticated: (auth: boolean) => void } {
+): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void } {
   container.innerHTML = ''
 
   const svg = svgEl('svg')

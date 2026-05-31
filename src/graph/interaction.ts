@@ -10,7 +10,7 @@ export function addInteraction(
   viewport: SVGGElement,
   graph: Graph,
   api: GraphAPI,
-): { setAuthenticated: (auth: boolean) => void } {
+): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void } {
   svg.style.userSelect = 'none'
 
   const state = { tx: 0, ty: 0, scale: 1 }
@@ -228,6 +228,46 @@ export function addInteraction(
     hidePanel() // close panel on auth change to avoid stale edit/readonly state
   }
 
+  function centerOnNode(id: string): void {
+    const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
+    if (!g) return
+    const nodeCx = Number(g.dataset.cx)
+    const nodeCy = Number(g.dataset.cy)
+    const svgRect = svg.getBoundingClientRect()
+    const targetScale = Math.max(1.0, Math.min(2.0, state.scale))
+    const targetTx = svgRect.width / 2 - nodeCx * targetScale
+    const targetTy = svgRect.height / 2 - nodeCy * targetScale
+
+    const startTx = state.tx
+    const startTy = state.ty
+    const startScale = state.scale
+    const animStart = performance.now()
+
+    function step(now: number): void {
+      const t = Math.min((now - animStart) / 400, 1)
+      const ease = 1 - Math.pow(1 - t, 3)
+      state.tx = startTx + (targetTx - startTx) * ease
+      state.ty = startTy + (targetTy - startTy) * ease
+      state.scale = startScale + (targetScale - startScale) * ease
+      applyTransform()
+      if (t < 1) requestAnimationFrame(step)
+    }
+    requestAnimationFrame(step)
+
+    // Briefly pulse border to #388bfd to draw the eye
+    const rectEl = nodeRect(g)
+    rectEl.setAttribute('stroke', '#388bfd')
+    rectEl.setAttribute('stroke-width', '2.5')
+    setTimeout(() => {
+      const node = graph.nodes.find(n => n.id === id)
+      if (!node) return
+      const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
+      rectEl.setAttribute('stroke', selectedNodes.has(id) ? SELECTED_STROKE : nodeBorderColor(node, graph.edges, nodeMap))
+      rectEl.setAttribute('stroke-width', '1.5')
+      if (!selectedNodes.has(id)) setPulse(rectEl, nodeIsReady(node, graph.edges, nodeMap))
+    }, 700)
+  }
+
   // ── Pan ────────────────────────────────────────────────────────────────────
 
   let panning = false
@@ -441,5 +481,5 @@ export function addInteraction(
     applyTransform()
   }, { passive: false })
 
-  return { setAuthenticated }
+  return { setAuthenticated, centerOnNode }
 }

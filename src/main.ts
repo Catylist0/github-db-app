@@ -2,10 +2,13 @@ import { storeToken, getToken, login, logout, isAuthenticated } from './auth/git
 import { loadGraph, upsertNode, deleteNode, upsertEdge, deleteEdge, onUnauthorized } from './storage/api'
 import { renderGraph } from './graph/renderer'
 import { hidePanel } from './ui/panel'
+import { hideSearchPanel, toggleSearchPanel, isSearchPanelOpen } from './ui/search'
+import type { Graph } from './types'
 
-let _controls: { setAuthenticated: (auth: boolean) => void } | null = null
+let _controls: { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void } | null = null
 let _username: string | null = null
 let _authHeader: HTMLElement | null = null
+let _graph: Graph | null = null
 
 // ── Error banner ──────────────────────────────────────────────────────────────
 
@@ -135,6 +138,46 @@ async function init(): Promise<void> {
   document.body.appendChild(_authHeader)
   updateAuthHeader()
 
+  // Search toggle button — below auth bar
+  const searchBtn = document.createElement('button')
+  searchBtn.type = 'button'
+  searchBtn.textContent = '⌕'
+  searchBtn.title = 'Search (⌘K)'
+  searchBtn.style.cssText =
+    'position:fixed;top:3.75rem;left:1rem;width:2rem;height:2rem;' +
+    'background:#161b22;border:1px solid #30363d;border-radius:var(--radius);' +
+    'color:#8b949e;font-size:.95rem;font-family:var(--font);' +
+    'cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:500;' +
+    'box-shadow:0 4px 16px rgba(0,0,0,.4);transition:color .15s,background .15s;'
+  searchBtn.addEventListener('mouseenter', () => {
+    searchBtn.style.color = '#e6edf3'
+    searchBtn.style.background = '#21262d'
+  })
+  searchBtn.addEventListener('mouseleave', () => {
+    searchBtn.style.color = '#8b949e'
+    searchBtn.style.background = '#161b22'
+  })
+  searchBtn.addEventListener('click', () => {
+    toggleSearchPanel(
+      () => _graph?.nodes ?? [],
+      (node) => _controls?.centerOnNode(node.id),
+    )
+  })
+  document.body.appendChild(searchBtn)
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault()
+      toggleSearchPanel(
+        () => _graph?.nodes ?? [],
+        (node) => _controls?.centerOnNode(node.id),
+      )
+    } else if (e.key === 'Escape' && isSearchPanelOpen()) {
+      hideSearchPanel()
+    }
+  })
+
   // Surface write auth failures as banner and revert to read-only
   onUnauthorized((reason) => {
     showErrorBanner(reason)
@@ -150,6 +193,7 @@ async function init(): Promise<void> {
 
   try {
     const graph = await loadGraph()
+    _graph = graph
     app.style.cssText = ''
     _controls = renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge })
     await handleOAuthCallback()
