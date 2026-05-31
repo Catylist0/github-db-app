@@ -91,7 +91,15 @@ export function addInteraction(
     pushBtn.style.opacity = '1'
   }
 
+  function syncNodePositions(): void {
+    for (const g of viewport.querySelectorAll<SVGGElement>('[data-node-id]')) {
+      const node = graph.nodes.find(n => n.id === g.dataset.nodeId)
+      if (node) { node.x = Number(g.dataset.cx); node.y = Number(g.dataset.cy) }
+    }
+  }
+
   pushBtn.addEventListener('click', () => {
+    syncNodePositions()
     pushBtn.textContent = 'Pushing…'
     pushBtn.disabled = true
     onSave(graph)
@@ -248,7 +256,9 @@ export function addInteraction(
 
   window.addEventListener('mouseup', (e: MouseEvent) => {
     if (activeNode) {
-      if (!hasDragged) {
+      if (hasDragged) {
+        markDirty()
+      } else {
         const nodeId = activeNode.dataset.nodeId!
         if (e.ctrlKey) {
           if (selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {
