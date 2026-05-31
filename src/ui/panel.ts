@@ -1,6 +1,6 @@
+import { marked } from 'marked'
 import type { Node } from '../types'
 
-// Callback stored so the close button can fire it even though it lives inside the panel DOM
 let pendingClose: (() => void) | undefined
 
 function injectStyles(): void {
@@ -14,7 +14,7 @@ function injectStyles(): void {
     #panel-desc-rendered h2{font-size:1.05em}
     #panel-desc-rendered h3{font-size:.95em}
     #panel-desc-rendered p{margin:.4em 0;color:#c9d1d9}
-    #panel-desc-rendered strong{color:#e6edf3;font-weight:600}
+    #panel-desc-rendered strong{color:#e6edf3;font-weight:700}
     #panel-desc-rendered em{font-style:italic;color:#c9d1d9}
     #panel-desc-rendered a{color:#58a6ff}
     #panel-desc-rendered code{background:#0d1117;border:1px solid #30363d;border-radius:3px;
@@ -35,20 +35,8 @@ function injectStyles(): void {
   document.head.appendChild(s)
 }
 
-async function toHtml(md: string): Promise<string> {
-  if (!md.trim()) return ''
-  try {
-    // @ts-ignore — CDN URL resolved at runtime, not by tsc
-    const mod = await import(/* @vite-ignore */ 'https://cdn.jsdelivr.net/npm/marked/marked.min.js')
-    const parse = (mod as Record<string, unknown>).marked ?? (mod as Record<string, unknown>).default
-    if (typeof parse === 'function') return parse(md) as string
-    if (typeof (globalThis as Record<string, unknown>).marked === 'function')
-      return ((globalThis as Record<string, unknown>).marked as (s: string) => string)(md)
-  } catch { /* ignore */ }
-  // plain fallback: escape and preserve newlines
-  return md
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\n/g, '<br>')
+function renderToHtml(md: string): string {
+  return marked(md) as string
 }
 
 export function hidePanel(immediate = false): void {
@@ -78,7 +66,6 @@ export function showPanel(
     'box-sizing:border-box;font-family:system-ui;' +
     'transform:translateX(320px);transition:transform .2s ease;'
   document.body.appendChild(panel)
-  // double-rAF so the initial transform is painted before we start transitioning
   requestAnimationFrame(() => requestAnimationFrame(() => {
     panel.style.transform = 'translateX(0)'
   }))
@@ -147,7 +134,7 @@ export function showPanel(
   const descWrap = fieldWrap()
   descWrap.appendChild(sectionLabel('Description'))
 
-  const sharedBorder =
+  const sharedFieldStyle =
     'background:#0d1117;border:1px solid #30363d;border-radius:6px;' +
     'padding:.45rem .65rem;box-sizing:border-box;width:100%;min-height:140px;' +
     'font-size:.8rem;line-height:1.55;outline:none;'
@@ -156,20 +143,17 @@ export function showPanel(
   textarea.value = node.description ?? ''
   textarea.placeholder = 'Add a description… (markdown supported)'
   textarea.style.cssText =
-    sharedBorder +
-    'color:#e6edf3;font-family:monospace;resize:vertical;display:block;'
+    sharedFieldStyle + 'color:#e6edf3;font-family:monospace;resize:vertical;'
 
   const rendered = document.createElement('div')
   rendered.id = 'panel-desc-rendered'
   rendered.style.cssText =
-    sharedBorder + 'color:#c9d1d9;cursor:text;word-break:break-word;display:none;'
+    sharedFieldStyle + 'color:#c9d1d9;cursor:text;word-break:break-word;display:none;'
 
-  let savedDesc = node.description ?? ''
+  const PLACEHOLDER_HTML = '<span style="color:#484f58;font-style:italic">Click to add a description…</span>'
 
-  async function applyRender(md: string): Promise<void> {
-    const html = await toHtml(md)
-    rendered.innerHTML = html ||
-      '<span style="color:#484f58">Add a description… (markdown supported)</span>'
+  function applyRender(md: string): void {
+    rendered.innerHTML = md.trim() ? renderToHtml(md) : PLACEHOLDER_HTML
   }
 
   function activateTextarea(): void {
@@ -177,6 +161,7 @@ export function showPanel(
     textarea.style.display = 'block'
     textarea.focus()
   }
+
   function activateRendered(): void {
     textarea.style.display = 'none'
     rendered.style.display = 'block'
@@ -185,19 +170,22 @@ export function showPanel(
   textarea.addEventListener('focus', () => { textarea.style.borderColor = '#58a6ff' })
   textarea.addEventListener('blur', () => {
     textarea.style.borderColor = '#30363d'
-    if (textarea.value !== savedDesc) {
-      savedDesc = textarea.value
-      onUpdate({ description: textarea.value })
+    const val = textarea.value
+    if (val !== savedDesc) {
+      savedDesc = val
+      onUpdate({ description: val })
     }
-    applyRender(textarea.value).then(activateRendered)
+    applyRender(val)
+    activateRendered()
   })
   rendered.addEventListener('click', activateTextarea)
 
+  let savedDesc = node.description ?? ''
+
   // Start in rendered mode if there's existing content, textarea otherwise
   if (node.description?.trim()) {
-    textarea.style.display = 'none'
-    rendered.style.display = 'block'
     applyRender(node.description)
+    activateRendered()
   }
 
   descWrap.appendChild(textarea)
