@@ -17,7 +17,7 @@ function showErrorBanner(message: string): void {
     'position:fixed;top:0;left:0;right:0;z-index:9999;' +
     'background:#da3633;color:#fff;padding:.6rem 1rem;' +
     'display:flex;justify-content:space-between;align-items:center;' +
-    'font-family:system-ui;font-size:.875rem;'
+    'font-family:var(--font);font-size:.875rem;'
   const msg = document.createElement('span')
   msg.textContent = `Authentication failed: ${message}`
   const x = document.createElement('button')
@@ -32,25 +32,36 @@ function showErrorBanner(message: string): void {
 
 // ── Auth header (top-left) ────────────────────────────────────────────────────
 
+const AUTH_CONTROL =
+  'display:inline-flex;align-items:center;justify-content:center;height:2rem;' +
+  'padding:0 .75rem;font-size:.8125rem;font-family:var(--font);white-space:nowrap;'
+
 function pill(text: string): HTMLElement {
   const el = document.createElement('div')
   el.style.cssText =
-    'display:inline-flex;align-items:center;height:1.875rem;padding:0 .65rem;' +
-    'background:#0d1117;border:1px solid #30363d;' +
-    'color:#8b949e;font-size:.8rem;font-family:system-ui;white-space:nowrap;'
+    AUTH_CONTROL +
+    'background:var(--surface);border:1px solid var(--border);' +
+    'color:var(--text-muted);border-right:none;'
   el.textContent = text
   return el
 }
 
 function authBtn(text: string, onClick: () => void): HTMLElement {
   const el = document.createElement('button')
+  el.type = 'button'
   el.textContent = text
   el.style.cssText =
-    'display:inline-flex;align-items:center;height:1.875rem;padding:0 .65rem;' +
-    'background:#0d1117;border:1px solid #30363d;margin-left:-1px;' +
-    'color:#e6edf3;font-size:.8rem;font-family:system-ui;cursor:pointer;white-space:nowrap;'
-  el.addEventListener('mouseenter', () => { el.style.color = '#fff'; el.style.borderColor = '#8b949e' })
-  el.addEventListener('mouseleave', () => { el.style.color = '#e6edf3'; el.style.borderColor = '#30363d' })
+    AUTH_CONTROL +
+    'background:var(--surface);border:1px solid var(--border);' +
+    'color:var(--text);cursor:pointer;transition:color .15s,background .15s;'
+  el.addEventListener('mouseenter', () => {
+    el.style.color = '#fff'
+    el.style.background = 'var(--surface-elevated)'
+  })
+  el.addEventListener('mouseleave', () => {
+    el.style.color = 'var(--text)'
+    el.style.background = 'var(--surface)'
+  })
   el.addEventListener('click', onClick)
   return el
 }
@@ -118,7 +129,9 @@ async function init(): Promise<void> {
   // Auth header — top-left
   _authHeader = document.createElement('div')
   _authHeader.style.cssText =
-    'position:fixed;top:1rem;left:1rem;display:flex;align-items:stretch;z-index:500;'
+    'position:fixed;top:1rem;left:1rem;display:flex;align-items:center;' +
+    'border-radius:var(--radius);overflow:hidden;z-index:500;' +
+    'box-shadow:0 4px 16px rgba(0,0,0,.4);'
   document.body.appendChild(_authHeader)
   updateAuthHeader()
 

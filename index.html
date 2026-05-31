@@ -6,12 +6,26 @@
     <title>GitHub DB App</title>
     <style>
       *, *::before, *::after { box-sizing: border-box; }
+      :root {
+        --bg: #0d1117;
+        --surface: #161b22;
+        --surface-elevated: #21262d;
+        --border: #30363d;
+        --border-muted: #21262d;
+        --text: #e6edf3;
+        --text-muted: #8b949e;
+        --text-subtle: #484f58;
+        --accent: #58a6ff;
+        --radius: 6px;
+        --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
       body {
-        font-family: system-ui, sans-serif;
+        font-family: var(--font);
         margin: 0;
         padding: 0;
-        background: #0d1117;
-        color: #e6edf3;
+        background: var(--bg);
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
       }
       #app {
         width: 100vw;
@@ -20,17 +34,15 @@
         padding: 0;
       }
       button {
-        margin-top: 1rem;
-        padding: 0.6rem 1.2rem;
-        font-size: 1rem;
-        background: #238636;
-        color: #fff;
+        font-family: inherit;
+        margin: 0;
+        padding: 0;
         border: none;
-        border-radius: 6px;
+        background: transparent;
+        color: inherit;
         cursor: pointer;
-      }
-      button:hover {
-        background: #2ea043;
+        font-size: inherit;
+        line-height: inherit;
       }
     </style>
   </head>

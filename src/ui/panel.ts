@@ -66,9 +66,10 @@ export function showPanel(
   panel.id = 'detail-panel'
   panel.style.cssText =
     'position:fixed;top:0;right:0;width:320px;height:100vh;overflow:hidden;' +
-    'background:#161b22;border-left:1px solid #30363d;z-index:1000;' +
-    'box-sizing:border-box;font-family:system-ui;display:flex;flex-direction:column;' +
-    'transform:translateX(320px);transition:transform .2s ease;'
+    'background:var(--surface);border-left:1px solid var(--border);z-index:1000;' +
+    'box-sizing:border-box;font-family:var(--font);display:flex;flex-direction:column;' +
+    'transform:translateX(320px);transition:transform .2s ease;' +
+    'box-shadow:-8px 0 24px rgba(0,0,0,.35);'
   document.body.appendChild(panel)
   if (wasOpen) {
     panel.style.transform = 'translateX(0)'
@@ -82,7 +83,7 @@ export function showPanel(
   const panelHeader = document.createElement('div')
   panelHeader.style.cssText =
     'display:flex;align-items:center;justify-content:flex-end;flex-shrink:0;' +
-    'height:2.25rem;padding:0 .5rem;border-bottom:1px solid #21262d;'
+    'height:2.5rem;padding:0 .625rem;border-bottom:1px solid var(--border-muted);'
   panel.appendChild(panelHeader)
 
   const closeBtn = document.createElement('button')
@@ -102,7 +103,7 @@ export function showPanel(
   // ── Content ───────────────────────────────────────────────────────────────
   const body = document.createElement('div')
   body.style.cssText =
-    'padding:1rem 1.25rem;display:flex;flex-direction:column;gap:.875rem;' +
+    'padding:1.125rem 1.25rem;display:flex;flex-direction:column;gap:1rem;' +
     'flex:1;min-height:0;overflow-y:auto;'
   panel.appendChild(body)
 
@@ -118,8 +119,8 @@ export function showPanel(
     const el = document.createElement('span')
     el.textContent = text
     el.style.cssText =
-      'font-size:.7rem;color:#8b949e;font-weight:600;' +
-      'letter-spacing:.06em;text-transform:uppercase;'
+      'font-size:.6875rem;color:var(--text-muted);font-weight:600;' +
+      'letter-spacing:.07em;text-transform:uppercase;'
     return el
   }
 
@@ -139,15 +140,16 @@ export function showPanel(
   labelInput.value = node.label
   labelInput.disabled = readonly
   labelInput.style.cssText =
-    'background:#0d1117;border:1px solid #30363d;' +
-    'padding:.4rem .6rem;color:#e6edf3;font-size:.875rem;font-family:system-ui;' +
-    `width:100%;box-sizing:border-box;outline:none;${readonly ? 'opacity:.45;cursor:default;' : ''}`
+    'background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);' +
+    'padding:.5rem .65rem;color:var(--text);font-size:.875rem;font-family:var(--font);' +
+    `width:100%;box-sizing:border-box;outline:none;transition:border-color .15s;` +
+    `${readonly ? 'opacity:.45;cursor:default;' : ''}`
   let savedLabel = node.label
   if (!readonly && autoFocusName) requestAnimationFrame(() => { labelInput.select(); labelInput.focus() })
   if (!readonly) {
-    labelInput.addEventListener('focus', () => { labelInput.style.borderColor = '#58a6ff' })
+    labelInput.addEventListener('focus', () => { labelInput.style.borderColor = 'var(--accent)' })
     labelInput.addEventListener('blur', () => {
-      labelInput.style.borderColor = '#30363d'
+      labelInput.style.borderColor = 'var(--border)'
       if (labelInput.value !== savedLabel) {
         savedLabel = labelInput.value
         onUpdate({ label: labelInput.value })
@@ -164,9 +166,10 @@ export function showPanel(
   descWrap.appendChild(sectionLabel('Description'))
 
   const sharedFieldStyle =
-    'background:#0d1117;border:1px solid #30363d;' +
-    'padding:.4rem .6rem;box-sizing:border-box;width:100%;' +
-    'font-size:.8rem;line-height:1.55;outline:none;flex:1;min-height:0;'
+    'background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);' +
+    'padding:.5rem .65rem;box-sizing:border-box;width:100%;' +
+    'font-size:.8125rem;line-height:1.55;outline:none;flex:1;min-height:0;' +
+    'transition:border-color .15s;'
 
   const PLACEHOLDER_HTML = readonly
     ? '<span style="color:#484f58;font-style:italic">No description.</span>'
@@ -204,9 +207,9 @@ export function showPanel(
       rendered.style.display = 'block'
     }
 
-    textarea.addEventListener('focus', () => { textarea.style.borderColor = '#58a6ff' })
+    textarea.addEventListener('focus', () => { textarea.style.borderColor = 'var(--accent)' })
     textarea.addEventListener('blur', () => {
-      textarea.style.borderColor = '#30363d'
+      textarea.style.borderColor = 'var(--border)'
       const val = textarea.value
       if (val !== savedDesc) { savedDesc = val; onUpdate({ description: val }) }
       applyRender(val)
@@ -225,19 +228,24 @@ export function showPanel(
   // ── Footer (always visible, never scrolls) ────────────────────────────────
   const footer = document.createElement('div')
   footer.style.cssText =
-    'flex-shrink:0;display:flex;flex-direction:column;gap:.4rem;' +
-    'padding:.625rem 1.25rem;border-top:1px solid #21262d;'
+    'flex-shrink:0;display:flex;flex-direction:column;gap:.625rem;' +
+    'padding:.875rem 1.25rem 1rem;border-top:1px solid var(--border-muted);'
   panel.appendChild(footer)
 
   // ── Status buttons ────────────────────────────────────────────────────────
+  const statusField = fieldWrap()
+  statusField.appendChild(sectionLabel('Status'))
+  footer.appendChild(statusField)
+
   const statusDefs: Array<{ value: NodeStatus; label: string; color: string }> = [
-    { value: 'planned',  label: 'Planned',  color: '#4b5563' },
+    { value: 'planned',  label: 'Planned',  color: '#6b7280' },
     { value: 'ongoing',  label: 'Ongoing',  color: '#f97316' },
     { value: 'complete', label: 'Complete', color: '#22c55e' },
   ]
 
   const statusWrap = document.createElement('div')
-  statusWrap.style.cssText = 'display:flex;gap:0;'
+  statusWrap.style.cssText =
+    'display:flex;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;'
 
   let currentStatus: NodeStatus = node.status
   const statusBtns: HTMLButtonElement[] = []
@@ -247,25 +255,31 @@ export function showPanel(
       const { color, value } = statusDefs[i]
       const btn = statusBtns[i]
       const active = value === currentStatus
-      btn.style.background = active ? color : 'transparent'
+      btn.style.background = active ? color : 'var(--bg)'
       btn.style.color = active ? '#fff' : color
-      btn.style.borderColor = color
-      btn.style.zIndex = active ? '1' : '0'
+      btn.style.fontWeight = active ? '600' : '500'
     }
   }
 
   for (let i = 0; i < statusDefs.length; i++) {
     const s = statusDefs[i]
     const btn = document.createElement('button')
+    btn.type = 'button'
     btn.textContent = s.label
     btn.disabled = readonly
     btn.style.cssText =
-      `flex:1;border:1px solid ${s.color};` +
-      `margin-left:${i === 0 ? '0' : '-1px'};` +
-      `padding:.35rem .2rem;font-size:.75rem;font-family:system-ui;` +
-      `cursor:${readonly ? 'default' : 'pointer'};background:transparent;` +
-      `color:${s.color};transition:background .12s,color .12s;position:relative;`
+      'flex:1;border:none;padding:.5rem .35rem;font-size:.75rem;font-family:var(--font);' +
+      `cursor:${readonly ? 'default' : 'pointer'};` +
+      'background:var(--bg);transition:background .15s,color .15s,font-weight .15s;' +
+      (i < statusDefs.length - 1 ? 'border-right:1px solid var(--border);' : '') +
+      `color:${s.color};`
     if (!readonly) {
+      btn.addEventListener('mouseenter', () => {
+        if (s.value !== currentStatus) btn.style.background = 'var(--surface-elevated)'
+      })
+      btn.addEventListener('mouseleave', () => {
+        if (s.value !== currentStatus) btn.style.background = 'var(--bg)'
+      })
       btn.addEventListener('click', () => {
         currentStatus = s.value
         applyStatusHighlight()
@@ -277,18 +291,19 @@ export function showPanel(
   }
 
   applyStatusHighlight()
-  footer.appendChild(statusWrap)
+  statusField.appendChild(statusWrap)
 
   // ── Delete button (edit mode only) ────────────────────────────────────────
   if (!readonly && onDelete) {
     const deleteBtn = document.createElement('button')
     deleteBtn.textContent = 'Delete node'
+    deleteBtn.type = 'button'
     deleteBtn.style.cssText =
-      'background:#da3633;border:none;' +
-      'padding:.45rem .75rem;color:#fff;font-size:.8rem;font-family:system-ui;' +
-      'cursor:pointer;width:100%;letter-spacing:.02em;'
-    deleteBtn.addEventListener('mouseenter', () => { deleteBtn.style.opacity = '0.8' })
-    deleteBtn.addEventListener('mouseleave', () => { deleteBtn.style.opacity = '1' })
+      'background:#b62324;border:1px solid #8e1519;border-radius:var(--radius);' +
+      'padding:.5rem .75rem;color:#fff;font-size:.8125rem;font-family:var(--font);' +
+      'cursor:pointer;width:100%;font-weight:500;transition:background .15s;'
+    deleteBtn.addEventListener('mouseenter', () => { deleteBtn.style.background = '#da3633' })
+    deleteBtn.addEventListener('mouseleave', () => { deleteBtn.style.background = '#b62324' })
     deleteBtn.addEventListener('click', () => {
       if (confirm(`Delete '${node.label}' and all its connections? This cannot be undone.`)) {
         onDelete()

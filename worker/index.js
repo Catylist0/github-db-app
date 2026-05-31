@@ -34,8 +34,6 @@ function json(data, status, corsHeaders) {
   })
 }
 
-// Uses GET /user/orgs rather than GET /user/memberships/orgs/:org,
-// which is blocked when the org has third-party OAuth App access restrictions.
 async function validateToken(token) {
   const headers = {
     Authorization: `Bearer ${token}`,
@@ -68,6 +66,31 @@ async function initSchema(db) {
   } catch { /* column already exists */ }
 }
 
+async function runBackup(env) {
+  const [nr, er] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM nodes'),
+    env.DB.prepare('SELECT * FROM edges'),
+  ])
+  const timestamp = new Date().toISOString()
+  const backup = JSON.stringify({
+    timestamp,
+    nodes: nr.results,
+    edges: er.results,
+  })
+
+  await env.BACKUPS.put(`backups/${timestamp}.json`, backup, {
+    httpMetadata: { contentType: 'application/json' },
+  })
+
+  // Delete backups older than 2 days
+  const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000
+  const list = await env.BACKUPS.list({ prefix: 'backups/' })
+  for (const obj of list.objects) {
+    const ts = new Date(obj.key.replace('backups/', '').replace('.json', '')).getTime()
+    if (ts < cutoff) await env.BACKUPS.delete(obj.key)
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
@@ -96,10 +119,9 @@ export default {
       return Response.redirect(redirect.toString(), 302)
     }
 
-    // Always init schema before any DB access (including the public GET /graph)
     await initSchema(env.DB)
 
-    // ── Public: GET /graph — no auth required ─────────────────────────────────
+    // ── Public: GET /graph ────────────────────────────────────────────────────
     if (request.method === 'GET' && url.pathname === '/graph') {
       const [nr, er] = await env.DB.batch([
         env.DB.prepare('SELECT * FROM nodes'),
@@ -121,7 +143,7 @@ export default {
       return json({ nodes: nr.results, edges: er.results }, 200, corsHeaders)
     }
 
-    // ── Auth middleware — all write endpoints require a valid token ────────────
+    // ── Auth middleware ───────────────────────────────────────────────────────
     const authHeader = request.headers.get('Authorization') ?? ''
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
     if (!token) return json({ error: 'Unauthorized', reason: 'no_token' }, 401, corsHeaders)
@@ -131,6 +153,22 @@ export default {
 
     const path = url.pathname
     const segments = path.split('/').filter(Boolean)
+
+    // GET /backups — list available backups
+    if (request.method === 'GET' && path === '/backups') {
+      const list = await env.BACKUPS.list({ prefix: 'backups/' })
+      const keys = list.objects.map(o => ({ key: o.key, uploaded: o.uploaded }))
+      return json(keys, 200, corsHeaders)
+    }
+
+    // GET /backups/:timestamp — fetch a specific backup
+    if (request.method === 'GET' && segments[0] === 'backups' && segments[1]) {
+      const key = `backups/${decodeURIComponent(segments[1])}.json`
+      const obj = await env.BACKUPS.get(key)
+      if (!obj) return json({ error: 'Not found' }, 404, corsHeaders)
+      const data = await obj.json()
+      return json(data, 200, corsHeaders)
+    }
 
     // POST /nodes
     if (request.method === 'POST' && path === '/nodes') {
@@ -175,5 +213,9 @@ export default {
     }
 
     return json({ error: 'Not found' }, 404, corsHeaders)
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runBackup(env))
   },
 }
