@@ -67,6 +67,7 @@ export function makeNodeEl(node: Node): SVGGElement {
   text.setAttribute('font-size', '13')
   text.setAttribute('font-family', 'system-ui')
   text.setAttribute('pointer-events', 'none')
+  text.style.userSelect = 'none'
   text.textContent = node.label
 
   g.appendChild(rect)

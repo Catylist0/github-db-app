@@ -53,6 +53,7 @@ export function showPanel(
   onUpdate: (updated: Partial<Node>) => void,
   onClose?: () => void,
   onDelete?: () => void,
+  autoFocusName = false,
 ): void {
   const wasOpen = !!document.getElementById('detail-panel')
   hidePanel(true)
@@ -129,6 +130,7 @@ export function showPanel(
     'padding:.45rem .65rem;color:#e6edf3;font-size:.9rem;font-family:system-ui;' +
     'width:100%;box-sizing:border-box;outline:none;'
   let savedLabel = node.label
+  if (autoFocusName) requestAnimationFrame(() => { labelInput.select(); labelInput.focus() })
   labelInput.addEventListener('focus', () => { labelInput.style.borderColor = '#58a6ff' })
   labelInput.addEventListener('blur', () => {
     labelInput.style.borderColor = '#30363d'

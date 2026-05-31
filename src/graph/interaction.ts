@@ -12,6 +12,8 @@ export function addInteraction(
   graph: Graph,
   api: GraphAPI,
 ): void {
+  svg.style.userSelect = 'none'
+
   const state = { tx: 0, ty: 0, scale: 1 }
 
   function applyTransform(): void {
@@ -103,7 +105,7 @@ export function addInteraction(
     clearSelection()
   }
 
-  function openPanel(node: Node): void {
+  function openPanel(node: Node, autoFocusName = false): void {
     const id = node.id
     showPanel(node, (updated) => {
       Object.assign(node, updated)
@@ -112,7 +114,7 @@ export function addInteraction(
         if (textEl) textEl.textContent = updated.label
       }
       api.upsertNode(node).catch(console.error)
-    }, clearSelection, () => handleDeleteNode(id))
+    }, clearSelection, () => handleDeleteNode(id), autoFocusName)
   }
 
   // ── Add-node mode ─────────────────────────────────────────────────────────
@@ -156,7 +158,7 @@ export function addInteraction(
       setAddMode(false)
       clearSelection()
       selectNode(node.id)
-      openPanel(node)
+      openPanel(node, true)
     }
   }
 
@@ -185,6 +187,8 @@ export function addInteraction(
 
   svg.addEventListener('mousedown', (e: Event) => {
     const me = e as MouseEvent
+    me.preventDefault() // block browser text-selection on any SVG drag
+
     const nodeG = (me.target as Element).closest<SVGGElement>('[data-node-id]')
 
     if (nodeG) {
@@ -207,7 +211,12 @@ export function addInteraction(
       return
     }
 
-    if (me.shiftKey) {
+    // addMode takes priority over shift box-select: shift+click in add mode
+    // should create a node (with add mode kept active), not start a box select
+    if (addMode) {
+      pendingAddPos = clientToViewport(me.clientX, me.clientY)
+      pendingAddClientStart = { x: me.clientX, y: me.clientY }
+    } else if (me.shiftKey) {
       boxSelecting = true
       boxVpStart = clientToViewport(me.clientX, me.clientY)
       boxEl = svgEl('rect')
@@ -221,9 +230,6 @@ export function addInteraction(
       boxEl.setAttribute('stroke-dasharray', String(4 / state.scale))
       boxEl.setAttribute('pointer-events', 'none')
       viewport.appendChild(boxEl)
-    } else if (addMode) {
-      pendingAddPos = clientToViewport(me.clientX, me.clientY)
-      pendingAddClientStart = { x: me.clientX, y: me.clientY }
     } else {
       hidePanel()
       panning = true
