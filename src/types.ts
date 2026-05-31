@@ -3,6 +3,7 @@ export interface Node {
   label: string
   x: number
   y: number
+  description?: string
 }
 
 export interface Edge {

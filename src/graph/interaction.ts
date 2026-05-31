@@ -1,5 +1,6 @@
 import type { Graph, GraphAPI } from '../types'
 import { svgEl, edgeEndpoint, makeEdgePath } from './utils'
+import { showPanel, hidePanel } from '../ui/panel'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
@@ -150,6 +151,7 @@ export function addInteraction(
       boxEl.setAttribute('pointer-events', 'none')
       viewport.appendChild(boxEl)
     } else {
+      hidePanel()
       panning = true
       panStart = { x: me.clientX, y: me.clientY }
       panOrigin = { tx: state.tx, ty: state.ty }
@@ -230,6 +232,15 @@ export function addInteraction(
         } else {
           clearSelection()
           selectNode(nodeId)
+          const node = graph.nodes.find(n => n.id === nodeId)!
+          showPanel(node, (updated) => {
+            Object.assign(node, updated)
+            if (updated.label !== undefined) {
+              const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${nodeId}"] text`)
+              if (textEl) textEl.textContent = updated.label
+            }
+            api.upsertNode(node).catch(console.error)
+          }, clearSelection)
         }
       }
       activeNode.style.cursor = 'grab'
