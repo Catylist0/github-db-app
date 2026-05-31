@@ -44,19 +44,21 @@ async function validateToken(token) {
     'User-Agent': 'openvic-pm-worker/1.0',
   }
 
+  // Get the authenticated user's login
   const userRes = await fetch('https://api.github.com/user', { headers })
-  if (!userRes.ok) return { ok: false, reason: `invalid_token:${userRes.status}` }
+  if (!userRes.ok) return { valid: false, reason: 'invalid_token' }
+  const { login } = await userRes.json()
 
-  // /user/orgs lists all orgs the authenticated user belongs to (public + private
-  // membership). With read:org scope this works without org-level app approval.
-  const orgsRes = await fetch('https://api.github.com/user/orgs?per_page=100', { headers })
-  if (!orgsRes.ok) return { ok: false, reason: `orgs_fetch_failed:${orgsRes.status}` }
+  // Check if they are a member of the public tasking team
+  const memberRes = await fetch(
+    `https://api.github.com/orgs/OpenVicProject/teams/tasking/members`,
+    { headers }
+  )
+  if (!memberRes.ok) return { valid: false, reason: `members_fetch_failed:${memberRes.status}` }
 
-  const orgs = await orgsRes.json()
-  if (!Array.isArray(orgs)) return { ok: false, reason: 'orgs_unexpected_response' }
-
-  const isMember = orgs.some(o => o.login === ALLOWED_ORG)
-  return { ok: isMember, reason: isMember ? null : 'not_org_member' }
+  const members = await memberRes.json()
+  const isMember = members.some(m => m.login === login)
+  return isMember ? { valid: true } : { valid: false, reason: 'not_team_member' }
 }
 
 async function initSchema(db) {
