@@ -6,6 +6,7 @@ on:
       - main
     paths-ignore:
       - 'data/graph.json'
+      - 'data/users/**'
 
 permissions:
   contents: read

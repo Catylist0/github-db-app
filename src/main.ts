@@ -1,7 +1,6 @@
 import { storeToken, getToken, login, isAuthenticated } from './auth/github'
-import { readFile, writeFile } from './storage/github'
+import { loadGraph, saveGraph } from './storage/github'
 import { renderGraph } from './graph/renderer'
-import type { Graph } from './types'
 
 async function extractTokenFromHash(): Promise<void> {
   const hash = window.location.hash
@@ -48,10 +47,10 @@ async function render(): Promise<void> {
   try {
     const [username, graph] = await Promise.all([
       fetchUsername(getToken()!),
-      readFile('data/graph.json') as Promise<Graph>,
+      loadGraph(),
     ])
 
-    renderGraph(graph, app, (g) => writeFile('data/graph.json', g, 'Update graph'))
+    renderGraph(graph, app, (g) => saveGraph(g, username))
 
     const badge = document.createElement('div')
     badge.style.cssText =
