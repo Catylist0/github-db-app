@@ -6,7 +6,7 @@ export function renderGraph(
   graph: Graph,
   container: HTMLElement,
   api: GraphAPI,
-): void {
+): { setAuthenticated: (auth: boolean) => void } {
   container.innerHTML = ''
 
   const svg = svgEl('svg')
@@ -48,5 +48,5 @@ export function renderGraph(
   }
 
   container.appendChild(svg)
-  addInteraction(svg, viewport, graph, api)
+  return addInteraction(svg, viewport, graph, api)
 }

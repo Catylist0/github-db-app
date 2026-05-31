@@ -34,31 +34,25 @@ function json(data, status, corsHeaders) {
   })
 }
 
-// Returns { ok: boolean, reason: string | null }
-// Uses GET /user/orgs (requires read:org scope) rather than
-// GET /user/memberships/orgs/:org, which is blocked when the org has
-// third-party OAuth App access restrictions enabled.
+// Uses GET /user/orgs rather than GET /user/memberships/orgs/:org,
+// which is blocked when the org has third-party OAuth App access restrictions.
 async function validateToken(token) {
   const headers = {
     Authorization: `Bearer ${token}`,
     'User-Agent': 'openvic-pm-worker/1.0',
   }
 
-  // Get the authenticated user's login
   const userRes = await fetch('https://api.github.com/user', { headers })
-  if (!userRes.ok) return { valid: false, reason: 'invalid_token' }
-  const { login } = await userRes.json()
+  if (!userRes.ok) return { ok: false, reason: `invalid_token:${userRes.status}` }
 
-  // Check if they are a member of the public tasking team
-  const memberRes = await fetch(
-    `https://api.github.com/orgs/OpenVicProject/teams/tasking/members`,
-    { headers }
-  )
-  if (!memberRes.ok) return { valid: false, reason: `members_fetch_failed:${memberRes.status}` }
+  const orgsRes = await fetch('https://api.github.com/user/orgs?per_page=100', { headers })
+  if (!orgsRes.ok) return { ok: false, reason: `orgs_fetch_failed:${orgsRes.status}` }
 
-  const members = await memberRes.json()
-  const isMember = members.some(m => m.login === login)
-  return isMember ? { valid: true } : { valid: false, reason: 'not_team_member' }
+  const orgs = await orgsRes.json()
+  if (!Array.isArray(orgs)) return { ok: false, reason: 'orgs_unexpected_response' }
+
+  const isMember = orgs.some(o => o.login === ALLOWED_ORG)
+  return { ok: isMember, reason: isMember ? null : 'not_org_member' }
 }
 
 async function initSchema(db) {
@@ -68,7 +62,7 @@ async function initSchema(db) {
   ])
   try {
     await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run()
-  } catch { /* column already exists — ignore */ }
+  } catch { /* column already exists */ }
 }
 
 export default {
@@ -99,21 +93,11 @@ export default {
       return Response.redirect(redirect.toString(), 302)
     }
 
-    // Auth middleware
-    const authHeader = request.headers.get('Authorization') ?? ''
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
-    if (!token) return json({ error: 'Unauthorized', reason: 'no_token' }, 401, corsHeaders)
-
-    const auth = await validateToken(token)
-    if (!auth.ok) return json({ error: 'Unauthorized', reason: auth.reason }, 401, corsHeaders)
-
+    // Always init schema before any DB access (including the public GET /graph)
     await initSchema(env.DB)
 
-    const path = url.pathname
-    const segments = path.split('/').filter(Boolean)
-
-    // GET /graph
-    if (request.method === 'GET' && path === '/graph') {
+    // ── Public: GET /graph — no auth required ─────────────────────────────────
+    if (request.method === 'GET' && url.pathname === '/graph') {
       const [nr, er] = await env.DB.batch([
         env.DB.prepare('SELECT * FROM nodes'),
         env.DB.prepare('SELECT * FROM edges'),
@@ -133,6 +117,17 @@ export default {
       }
       return json({ nodes: nr.results, edges: er.results }, 200, corsHeaders)
     }
+
+    // ── Auth middleware — all write endpoints require a valid token ────────────
+    const authHeader = request.headers.get('Authorization') ?? ''
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+    if (!token) return json({ error: 'Unauthorized', reason: 'no_token' }, 401, corsHeaders)
+
+    const auth = await validateToken(token)
+    if (!auth.ok) return json({ error: 'Unauthorized', reason: auth.reason }, 401, corsHeaders)
+
+    const path = url.pathname
+    const segments = path.split('/').filter(Boolean)
 
     // POST /nodes
     if (request.method === 'POST' && path === '/nodes') {

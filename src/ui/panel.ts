@@ -54,6 +54,7 @@ export function showPanel(
   onClose?: () => void,
   onDelete?: () => void,
   autoFocusName = false,
+  readonly = false,
 ): void {
   const wasOpen = !!document.getElementById('detail-panel')
   hidePanel(true)
@@ -69,7 +70,6 @@ export function showPanel(
     'box-sizing:border-box;font-family:system-ui;display:flex;flex-direction:column;' +
     'transform:translateX(320px);transition:transform .2s ease;'
   document.body.appendChild(panel)
-  // Skip animation when switching between nodes — only slide in from closed
   if (wasOpen) {
     panel.style.transform = 'translateX(0)'
   } else {
@@ -101,6 +101,15 @@ export function showPanel(
     'flex:1;min-height:0;overflow-y:auto;'
   panel.appendChild(body)
 
+  // Read-only hint
+  if (readonly) {
+    const hint = document.createElement('div')
+    hint.style.cssText =
+      'font-size:.75rem;color:#484f58;font-style:italic;margin-top:.25rem;'
+    hint.textContent = 'Login to edit'
+    body.appendChild(hint)
+  }
+
   function sectionLabel(text: string): HTMLElement {
     const el = document.createElement('span')
     el.textContent = text
@@ -118,27 +127,30 @@ export function showPanel(
 
   // ── Name ──────────────────────────────────────────────────────────────────
   const nameWrap = fieldWrap()
-  nameWrap.style.marginTop = '.4rem'
+  nameWrap.style.marginTop = readonly ? '0' : '.4rem'
   nameWrap.style.flexShrink = '0'
   nameWrap.appendChild(sectionLabel('Name'))
 
   const labelInput = document.createElement('input')
   labelInput.type = 'text'
   labelInput.value = node.label
+  labelInput.disabled = readonly
   labelInput.style.cssText =
     'background:#0d1117;border:1px solid #30363d;border-radius:6px;' +
     'padding:.45rem .65rem;color:#e6edf3;font-size:.9rem;font-family:system-ui;' +
-    'width:100%;box-sizing:border-box;outline:none;'
+    `width:100%;box-sizing:border-box;outline:none;${readonly ? 'opacity:.55;cursor:default;' : ''}`
   let savedLabel = node.label
-  if (autoFocusName) requestAnimationFrame(() => { labelInput.select(); labelInput.focus() })
-  labelInput.addEventListener('focus', () => { labelInput.style.borderColor = '#58a6ff' })
-  labelInput.addEventListener('blur', () => {
-    labelInput.style.borderColor = '#30363d'
-    if (labelInput.value !== savedLabel) {
-      savedLabel = labelInput.value
-      onUpdate({ label: labelInput.value })
-    }
-  })
+  if (!readonly && autoFocusName) requestAnimationFrame(() => { labelInput.select(); labelInput.focus() })
+  if (!readonly) {
+    labelInput.addEventListener('focus', () => { labelInput.style.borderColor = '#58a6ff' })
+    labelInput.addEventListener('blur', () => {
+      labelInput.style.borderColor = '#30363d'
+      if (labelInput.value !== savedLabel) {
+        savedLabel = labelInput.value
+        onUpdate({ label: labelInput.value })
+      }
+    })
+  }
   nameWrap.appendChild(labelInput)
   body.appendChild(nameWrap)
 
@@ -153,61 +165,63 @@ export function showPanel(
     'padding:.45rem .65rem;box-sizing:border-box;width:100%;' +
     'font-size:.8rem;line-height:1.55;outline:none;flex:1;min-height:0;'
 
-  const textarea = document.createElement('textarea')
-  textarea.value = node.description ?? ''
-  textarea.placeholder = 'Add a description… (markdown supported)'
-  textarea.style.cssText =
-    sharedFieldStyle + 'color:#e6edf3;font-family:monospace;resize:none;'
+  const PLACEHOLDER_HTML = readonly
+    ? '<span style="color:#484f58;font-style:italic">No description.</span>'
+    : '<span style="color:#484f58;font-style:italic">Click to add a description…</span>'
 
   const rendered = document.createElement('div')
   rendered.id = 'panel-desc-rendered'
   rendered.style.cssText =
-    sharedFieldStyle + 'color:#c9d1d9;cursor:text;word-break:break-word;overflow-y:auto;display:none;'
-
-  const PLACEHOLDER_HTML = '<span style="color:#484f58;font-style:italic">Click to add a description…</span>'
+    sharedFieldStyle +
+    `color:#c9d1d9;word-break:break-word;overflow-y:auto;` +
+    (readonly ? 'cursor:default;opacity:.85;' : 'cursor:text;display:none;')
 
   function applyRender(md: string): void {
     rendered.innerHTML = md.trim() ? renderToHtml(md) : PLACEHOLDER_HTML
   }
 
-  function activateTextarea(): void {
-    rendered.style.display = 'none'
-    textarea.style.display = 'block'
-    textarea.focus()
-  }
+  if (readonly) {
+    // Always show rendered view — no textarea
+    applyRender(node.description ?? '')
+    descWrap.appendChild(rendered)
+  } else {
+    const textarea = document.createElement('textarea')
+    textarea.value = node.description ?? ''
+    textarea.placeholder = 'Add a description… (markdown supported)'
+    textarea.style.cssText = sharedFieldStyle + 'color:#e6edf3;font-family:monospace;resize:none;'
 
-  function activateRendered(): void {
-    textarea.style.display = 'none'
-    rendered.style.display = 'block'
-  }
+    let savedDesc = node.description ?? ''
 
-  textarea.addEventListener('focus', () => { textarea.style.borderColor = '#58a6ff' })
-  textarea.addEventListener('blur', () => {
-    textarea.style.borderColor = '#30363d'
-    const val = textarea.value
-    if (val !== savedDesc) {
-      savedDesc = val
-      onUpdate({ description: val })
+    function activateTextarea(): void {
+      rendered.style.display = 'none'
+      textarea.style.display = 'block'
+      textarea.focus()
     }
-    applyRender(val)
-    activateRendered()
-  })
-  rendered.addEventListener('click', activateTextarea)
+    function activateRendered(): void {
+      textarea.style.display = 'none'
+      rendered.style.display = 'block'
+    }
 
-  let savedDesc = node.description ?? ''
+    textarea.addEventListener('focus', () => { textarea.style.borderColor = '#58a6ff' })
+    textarea.addEventListener('blur', () => {
+      textarea.style.borderColor = '#30363d'
+      const val = textarea.value
+      if (val !== savedDesc) { savedDesc = val; onUpdate({ description: val }) }
+      applyRender(val)
+      activateRendered()
+    })
+    rendered.addEventListener('click', activateTextarea)
 
-  // Start in rendered mode if there's existing content, textarea otherwise
-  if (node.description?.trim()) {
-    applyRender(node.description)
-    activateRendered()
+    if (node.description?.trim()) { applyRender(node.description); activateRendered() }
+
+    descWrap.appendChild(textarea)
+    descWrap.appendChild(rendered)
   }
 
-  descWrap.appendChild(textarea)
-  descWrap.appendChild(rendered)
   body.appendChild(descWrap)
 
-  // ── Delete button ─────────────────────────────────────────────────────────
-  if (onDelete) {
+  // ── Delete button (edit mode only) ────────────────────────────────────────
+  if (!readonly && onDelete) {
     const deleteBtn = document.createElement('button')
     deleteBtn.textContent = 'Delete node'
     deleteBtn.style.cssText =

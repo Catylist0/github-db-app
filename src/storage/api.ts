@@ -2,6 +2,11 @@ import { getToken } from '../auth/github'
 import { WORKER_URL } from '../config'
 import type { Graph, Node, Edge } from '../types'
 
+let _onUnauthorized: ((reason: string) => void) | null = null
+export function onUnauthorized(fn: (reason: string) => void): void {
+  _onUnauthorized = fn
+}
+
 function authHeaders(): Record<string, string> {
   const token = getToken()
   if (!token) throw new Error('Not authenticated')
@@ -15,13 +20,24 @@ async function apiFetch(path: string, init?: RequestInit): Promise<unknown> {
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
+    if (res.status === 401) {
+      let reason = 'unauthorized'
+      try { reason = (JSON.parse(body) as { reason?: string }).reason ?? reason } catch { /* ignore */ }
+      _onUnauthorized?.(reason)
+    }
     throw new Error(`${init?.method ?? 'GET'} ${path}: ${res.status}${body ? ` — ${body}` : ''}`)
   }
   return res.json()
 }
 
+// Public — no auth token required
 export async function loadGraph(): Promise<Graph> {
-  const data = await apiFetch('/graph') as {
+  const res = await fetch(`${WORKER_URL}/graph`)
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`GET /graph: ${res.status}${body ? ` — ${body}` : ''}`)
+  }
+  const data = await res.json() as {
     nodes: Node[]
     edges: Array<{ id: string; source: string; target: string }>
   }

@@ -11,7 +11,7 @@ export function addInteraction(
   viewport: SVGGElement,
   graph: Graph,
   api: GraphAPI,
-): void {
+): { setAuthenticated: (auth: boolean) => void } {
   svg.style.userSelect = 'none'
 
   const state = { tx: 0, ty: 0, scale: 1 }
@@ -27,6 +27,10 @@ export function addInteraction(
       y: (cy - r.top - state.ty) / state.scale,
     }
   }
+
+  // ── Auth state ─────────────────────────────────────────────────────────────
+
+  let authenticated = false
 
   // ── Selection ──────────────────────────────────────────────────────────────
 
@@ -107,14 +111,22 @@ export function addInteraction(
 
   function openPanel(node: Node, autoFocusName = false): void {
     const id = node.id
-    showPanel(node, (updated) => {
-      Object.assign(node, updated)
-      if (updated.label !== undefined) {
-        const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
-        if (textEl) textEl.textContent = updated.label
-      }
-      api.upsertNode(node).catch(console.error)
-    }, clearSelection, () => handleDeleteNode(id), autoFocusName)
+    const isReadonly = !authenticated
+    showPanel(
+      node,
+      isReadonly ? () => {} : (updated) => {
+        Object.assign(node, updated)
+        if (updated.label !== undefined) {
+          const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
+          if (textEl) textEl.textContent = updated.label
+        }
+        api.upsertNode(node).catch(console.error)
+      },
+      clearSelection,
+      isReadonly ? undefined : () => handleDeleteNode(id),
+      isReadonly ? false : autoFocusName,
+      isReadonly,
+    )
   }
 
   // ── Add-node mode ─────────────────────────────────────────────────────────
@@ -129,7 +141,7 @@ export function addInteraction(
     'position:fixed;bottom:1rem;left:1rem;width:2rem;height:2rem;' +
     'background:#1f2937;border:1px solid #4b5563;border-radius:6px;' +
     'color:#e6edf3;font-size:1.3rem;line-height:1;font-family:system-ui;' +
-    'cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;'
+    'cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;'
   document.body.appendChild(addBtn)
 
   function setAddMode(active: boolean): void {
@@ -141,7 +153,6 @@ export function addInteraction(
     if (active && !addModeDocListener) {
       addModeDocListener = (e: MouseEvent) => {
         const t = e.target as Element
-        // ignore clicks on the SVG canvas (handled there) and on the toggle button itself
         if (svg.contains(t) || addBtn.contains(t)) return
         setAddMode(false)
       }
@@ -176,6 +187,15 @@ export function addInteraction(
     }
   }
 
+  // ── Public controls ───────────────────────────────────────────────────────
+
+  function setAuthenticated(auth: boolean): void {
+    authenticated = auth
+    addBtn.style.display = auth ? 'flex' : 'none'
+    if (!auth) setAddMode(false)
+    hidePanel() // close panel on auth change to avoid stale edit/readonly state
+  }
+
   // ── Pan ────────────────────────────────────────────────────────────────────
 
   let panning = false
@@ -201,7 +221,7 @@ export function addInteraction(
 
   svg.addEventListener('mousedown', (e: Event) => {
     const me = e as MouseEvent
-    me.preventDefault() // block browser text-selection on any SVG drag
+    me.preventDefault()
 
     const nodeG = (me.target as Element).closest<SVGGElement>('[data-node-id]')
 
@@ -213,7 +233,7 @@ export function addInteraction(
       singleDragOrigin = { cx: Number(nodeG.dataset.cx), cy: Number(nodeG.dataset.cy) }
 
       const nodeId = nodeG.dataset.nodeId!
-      if (me.shiftKey && selectedNodes.has(nodeId)) {
+      if (authenticated && me.shiftKey && selectedNodes.has(nodeId)) {
         isMultiDrag = true
         multiDragOrigins.clear()
         for (const id of selectedNodes) {
@@ -226,8 +246,6 @@ export function addInteraction(
       return
     }
 
-    // addMode takes priority over shift box-select: shift+click in add mode
-    // should create a node (with add mode kept active), not start a box select
     if (addMode) {
       pendingAddPos = clientToViewport(me.clientX, me.clientY)
       pendingAddClientStart = { x: me.clientX, y: me.clientY }
@@ -260,6 +278,7 @@ export function addInteraction(
       const dx = e.clientX - dragClientStart.x
       const dy = e.clientY - dragClientStart.y
       if (!hasDragged && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        if (!authenticated) return // no drag in read-only; click will still register on mouseup
         hasDragged = true
         activeNode.style.cursor = 'grabbing'
       }
@@ -307,6 +326,7 @@ export function addInteraction(
   window.addEventListener('mouseup', (e: MouseEvent) => {
     if (activeNode) {
       if (hasDragged) {
+        // Persist new positions (only reachable when authenticated)
         const moved = isMultiDrag ? [...multiDragOrigins.keys()] : [activeNode.dataset.nodeId!]
         for (const id of moved) {
           const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
@@ -318,8 +338,9 @@ export function addInteraction(
           }
         }
       } else {
+        // Click: open panel (read-only or edit depending on auth)
         const nodeId = activeNode.dataset.nodeId!
-        if (e.ctrlKey) {
+        if (authenticated && e.ctrlKey) {
           if (selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {
             toggleEdge([...selectedNodes][0], nodeId)
           }
@@ -387,4 +408,6 @@ export function addInteraction(
     state.scale = newScale
     applyTransform()
   }, { passive: false })
+
+  return { setAuthenticated }
 }
