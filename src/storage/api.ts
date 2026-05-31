@@ -50,7 +50,7 @@ export async function loadGraph(): Promise<Graph> {
 export async function upsertNode(node: Node): Promise<void> {
   await apiFetch(`/nodes/${node.id}`, {
     method: 'PATCH',
-    body: JSON.stringify({ label: node.label, x: node.x, y: node.y, description: node.description ?? null }),
+    body: JSON.stringify({ label: node.label, x: node.x, y: node.y, description: node.description ?? null, status: node.status }),
   })
 }
 

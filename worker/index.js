@@ -2,12 +2,12 @@ const ALLOWED_ORIGIN = 'https://catylist0.github.io'
 const ALLOWED_ORG = 'OpenVicProject'
 
 const SEED_NODES = [
-  { id: '1', label: 'Project Alpha', x: 400, y: 300, description: null },
-  { id: '2', label: 'Design',        x: 200, y: 150, description: null },
-  { id: '3', label: 'Frontend',      x: 400, y: 150, description: null },
-  { id: '4', label: 'Backend',       x: 600, y: 150, description: null },
-  { id: '5', label: 'Wireframes',    x: 100, y:  50, description: null },
-  { id: '6', label: 'Components',    x: 400, y:  50, description: null },
+  { id: '1', label: 'Project Alpha', x: 400, y: 300, description: null, status: 'planned' },
+  { id: '2', label: 'Design',        x: 200, y: 150, description: null, status: 'planned' },
+  { id: '3', label: 'Frontend',      x: 400, y: 150, description: null, status: 'planned' },
+  { id: '4', label: 'Backend',       x: 600, y: 150, description: null, status: 'planned' },
+  { id: '5', label: 'Wireframes',    x: 100, y:  50, description: null, status: 'planned' },
+  { id: '6', label: 'Components',    x: 400, y:  50, description: null, status: 'planned' },
 ]
 
 const SEED_EDGES = [
@@ -63,6 +63,9 @@ async function initSchema(db) {
   try {
     await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run()
   } catch { /* column already exists */ }
+  try {
+    await db.prepare("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'planned'").run()
+  } catch { /* column already exists */ }
 }
 
 export default {
@@ -105,8 +108,8 @@ export default {
       if (nr.results.length === 0) {
         await env.DB.batch([
           ...SEED_NODES.map(n =>
-            env.DB.prepare('INSERT OR IGNORE INTO nodes (id,label,x,y,description) VALUES (?,?,?,?,?)')
-              .bind(n.id, n.label, n.x, n.y, n.description)
+            env.DB.prepare('INSERT OR IGNORE INTO nodes (id,label,x,y,description,status) VALUES (?,?,?,?,?,?)')
+              .bind(n.id, n.label, n.x, n.y, n.description, n.status)
           ),
           ...SEED_EDGES.map(e =>
             env.DB.prepare('INSERT OR IGNORE INTO edges (id,source,target) VALUES (?,?,?)')
@@ -131,18 +134,18 @@ export default {
 
     // POST /nodes
     if (request.method === 'POST' && path === '/nodes') {
-      const { id, label, x, y, description } = await request.json()
-      await env.DB.prepare('INSERT INTO nodes (id,label,x,y,description) VALUES (?,?,?,?,?)')
-        .bind(id, label, x, y, description ?? null).run()
+      const { id, label, x, y, description, status } = await request.json()
+      await env.DB.prepare('INSERT INTO nodes (id,label,x,y,description,status) VALUES (?,?,?,?,?,?)')
+        .bind(id, label, x, y, description ?? null, status ?? 'planned').run()
       return json({ ok: true }, 201, corsHeaders)
     }
 
     // PATCH /nodes/:id
     if (request.method === 'PATCH' && segments[0] === 'nodes' && segments[1]) {
       const id = decodeURIComponent(segments[1])
-      const { label, x, y, description } = await request.json()
-      await env.DB.prepare('INSERT OR REPLACE INTO nodes (id,label,x,y,description) VALUES (?,?,?,?,?)')
-        .bind(id, label, x, y, description ?? null).run()
+      const { label, x, y, description, status } = await request.json()
+      await env.DB.prepare('INSERT OR REPLACE INTO nodes (id,label,x,y,description,status) VALUES (?,?,?,?,?,?)')
+        .bind(id, label, x, y, description ?? null, status ?? 'planned').run()
       return json({ ok: true }, 200, corsHeaders)
     }
 

@@ -1,4 +1,4 @@
-import type { Node } from '../types'
+import type { Node, Edge } from '../types'
 
 const NS = 'http://www.w3.org/2000/svg'
 
@@ -23,6 +23,15 @@ export function edgeEndpoint(fx: number, fy: number, tx: number, ty: number): { 
   return { x: tx + t * ux, y: ty + t * uy }
 }
 
+export function nodeBorderColor(node: Node, edges: Edge[], nodeMap: Map<string, Node>): string {
+  if (node.status === 'ongoing') return '#f97316'
+  if (node.status === 'complete') return '#22c55e'
+  const allIncomingComplete = edges
+    .filter(e => e.to === node.id)
+    .every(e => nodeMap.get(e.from)?.status === 'complete')
+  return allIncomingComplete ? '#e6edf3' : '#4b5563'
+}
+
 export function makeEdgePath(
   fromPos: { x: number; y: number },
   toPos: { x: number; y: number },
@@ -42,7 +51,7 @@ export function makeEdgePath(
   return path
 }
 
-export function makeNodeEl(node: Node): SVGGElement {
+export function makeNodeEl(node: Node, borderColor = '#4b5563'): SVGGElement {
   const g = svgEl('g')
   g.dataset.nodeId = node.id
   g.dataset.cx = String(node.x)
@@ -55,7 +64,7 @@ export function makeNodeEl(node: Node): SVGGElement {
   rect.setAttribute('height', '40')
   rect.setAttribute('rx', '8')
   rect.setAttribute('fill', '#1f2937')
-  rect.setAttribute('stroke', '#4b5563')
+  rect.setAttribute('stroke', borderColor)
   rect.setAttribute('stroke-width', '1.5')
 
   const text = svgEl('text')

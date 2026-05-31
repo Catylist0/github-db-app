@@ -1,5 +1,5 @@
 import { marked } from 'marked'
-import type { Node } from '../types'
+import type { Node, NodeStatus } from '../types'
 
 let pendingClose: (() => void) | undefined
 
@@ -219,6 +219,52 @@ export function showPanel(
   }
 
   body.appendChild(descWrap)
+
+  // ── Status buttons ────────────────────────────────────────────────────────
+  const statusDefs: Array<{ value: NodeStatus; label: string; color: string }> = [
+    { value: 'planned',  label: 'Planned',  color: '#4b5563' },
+    { value: 'ongoing',  label: 'Ongoing',  color: '#f97316' },
+    { value: 'complete', label: 'Complete', color: '#22c55e' },
+  ]
+
+  const statusWrap = document.createElement('div')
+  statusWrap.style.cssText = 'display:flex;gap:.4rem;flex-shrink:0;'
+
+  let currentStatus: NodeStatus = node.status
+  const statusBtns: HTMLButtonElement[] = []
+
+  function applyStatusHighlight(): void {
+    for (let i = 0; i < statusDefs.length; i++) {
+      const { color, value } = statusDefs[i]
+      const btn = statusBtns[i]
+      const active = value === currentStatus
+      btn.style.background = active ? color : 'transparent'
+      btn.style.color = active ? '#fff' : color
+    }
+  }
+
+  for (const s of statusDefs) {
+    const btn = document.createElement('button')
+    btn.textContent = s.label
+    btn.disabled = readonly
+    btn.style.cssText =
+      `flex:1;border:1px solid ${s.color};border-radius:6px;` +
+      `padding:.4rem .2rem;font-size:.78rem;font-family:system-ui;` +
+      `cursor:${readonly ? 'default' : 'pointer'};background:transparent;` +
+      `color:${s.color};transition:background .12s,color .12s;`
+    if (!readonly) {
+      btn.addEventListener('click', () => {
+        currentStatus = s.value
+        applyStatusHighlight()
+        onUpdate({ status: s.value })
+      })
+    }
+    statusBtns.push(btn)
+    statusWrap.appendChild(btn)
+  }
+
+  applyStatusHighlight()
+  body.appendChild(statusWrap)
 
   // ── Delete button (edit mode only) ────────────────────────────────────────
   if (!readonly && onDelete) {

@@ -1,9 +1,12 @@
+export type NodeStatus = 'planned' | 'ongoing' | 'complete'
+
 export interface Node {
   id: string
   label: string
   x: number
   y: number
   description?: string
+  status: NodeStatus
 }
 
 export interface Edge {

@@ -1,10 +1,9 @@
 import type { Graph, GraphAPI, Node } from '../types'
-import { svgEl, edgeEndpoint, makeEdgePath, makeNodeEl } from './utils'
+import { svgEl, edgeEndpoint, makeEdgePath, makeNodeEl, nodeBorderColor } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
-const DEFAULT_STROKE = '#4b5563'
 
 export function addInteraction(
   svg: SVGSVGElement,
@@ -46,10 +45,26 @@ export function addInteraction(
     if (g) nodeRect(g).setAttribute('stroke', SELECTED_STROKE)
   }
 
+  function computedBorder(nodeId: string): string {
+    const node = graph.nodes.find(n => n.id === nodeId)
+    if (!node) return '#4b5563'
+    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
+    return nodeBorderColor(node, graph.edges, nodeMap)
+  }
+
+  function refreshAllBorders(): void {
+    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
+    for (const node of graph.nodes) {
+      if (selectedNodes.has(node.id)) continue
+      const g = viewport.querySelector<SVGGElement>(`[data-node-id="${node.id}"]`)
+      if (g) nodeRect(g).setAttribute('stroke', nodeBorderColor(node, graph.edges, nodeMap))
+    }
+  }
+
   function deselectNode(id: string): void {
     selectedNodes.delete(id)
     const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
-    if (g) nodeRect(g).setAttribute('stroke', DEFAULT_STROKE)
+    if (g) nodeRect(g).setAttribute('stroke', computedBorder(id))
   }
 
   function clearSelection(): void {
@@ -120,6 +135,7 @@ export function addInteraction(
           const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
           if (textEl) textEl.textContent = updated.label
         }
+        if (updated.status !== undefined) refreshAllBorders()
         api.upsertNode(node).catch(console.error)
       },
       clearSelection,
@@ -174,9 +190,11 @@ export function addInteraction(
       label: 'Unnamed',
       x: Math.round(vp.x),
       y: Math.round(vp.y),
+      status: 'planned',
     }
     graph.nodes.push(node)
-    viewport.appendChild(makeNodeEl(node))
+    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
+    viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap)))
     api.upsertNode(node).catch(console.error)
 
     if (!shiftHeld) {
