@@ -165,19 +165,19 @@ export function addInteraction(
   let addModeDocListener: ((e: MouseEvent) => void) | null = null
 
   const addBtn = document.createElement('button')
-  addBtn.textContent = '+'
-  addBtn.title = 'Add node'
+  addBtn.textContent = 'Create node'
   addBtn.style.cssText =
-    'position:fixed;bottom:1rem;left:1rem;width:2rem;height:2rem;' +
-    'background:#1f2937;border:1px solid #4b5563;border-radius:6px;' +
-    'color:#e6edf3;font-size:1.3rem;line-height:1;font-family:system-ui;' +
-    'cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;'
+    'position:fixed;bottom:1rem;left:1rem;height:1.875rem;padding:0 .75rem;' +
+    'background:#0d1117;border:1px solid #30363d;' +
+    'color:#8b949e;font-size:.8rem;font-family:system-ui;letter-spacing:.02em;' +
+    'cursor:pointer;display:none;align-items:center;justify-content:center;'
   document.body.appendChild(addBtn)
 
   function setAddMode(active: boolean): void {
     addMode = active
-    addBtn.style.borderColor = active ? SELECTED_STROKE : '#4b5563'
-    addBtn.style.color = active ? SELECTED_STROKE : '#e6edf3'
+    addBtn.style.background = active ? '#e6edf3' : '#0d1117'
+    addBtn.style.color = active ? '#0d1117' : '#8b949e'
+    addBtn.style.borderColor = active ? '#e6edf3' : '#30363d'
     svg.style.cursor = active ? 'crosshair' : ''
 
     if (active && !addModeDocListener) {

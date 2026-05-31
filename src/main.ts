@@ -35,8 +35,9 @@ function showErrorBanner(message: string): void {
 function pill(text: string): HTMLElement {
   const el = document.createElement('div')
   el.style.cssText =
-    'background:#1f2937;border:1px solid #4b5563;padding:.35rem .75rem;' +
-    'border-radius:6px;color:#e6edf3;font-size:13px;font-family:system-ui;white-space:nowrap;'
+    'display:inline-flex;align-items:center;height:1.875rem;padding:0 .65rem;' +
+    'background:#0d1117;border:1px solid #30363d;' +
+    'color:#8b949e;font-size:.8rem;font-family:system-ui;white-space:nowrap;'
   el.textContent = text
   return el
 }
@@ -45,9 +46,11 @@ function authBtn(text: string, onClick: () => void): HTMLElement {
   const el = document.createElement('button')
   el.textContent = text
   el.style.cssText =
-    'background:#1f2937;border:1px solid #4b5563;padding:.35rem .75rem;' +
-    'border-radius:6px;color:#e6edf3;font-size:13px;font-family:system-ui;' +
-    'cursor:pointer;white-space:nowrap;'
+    'display:inline-flex;align-items:center;height:1.875rem;padding:0 .65rem;' +
+    'background:#0d1117;border:1px solid #30363d;margin-left:-1px;' +
+    'color:#e6edf3;font-size:.8rem;font-family:system-ui;cursor:pointer;white-space:nowrap;'
+  el.addEventListener('mouseenter', () => { el.style.color = '#fff'; el.style.borderColor = '#8b949e' })
+  el.addEventListener('mouseleave', () => { el.style.color = '#e6edf3'; el.style.borderColor = '#30363d' })
   el.addEventListener('click', onClick)
   return el
 }
@@ -115,7 +118,7 @@ async function init(): Promise<void> {
   // Auth header — top-left
   _authHeader = document.createElement('div')
   _authHeader.style.cssText =
-    'position:fixed;top:1rem;left:1rem;display:flex;align-items:center;gap:.5rem;z-index:500;'
+    'position:fixed;top:1rem;left:1rem;display:flex;align-items:stretch;z-index:500;'
   document.body.appendChild(_authHeader)
   updateAuthHeader()
 
