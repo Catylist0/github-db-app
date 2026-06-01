@@ -9,6 +9,9 @@ export function svgEl<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementT
 const NODE_HW = 60
 const NODE_HH = 20
 
+export const NODE_STROKE_WIDTH = 1.5
+export const SELECTED_NODE_STROKE_WIDTH = NODE_STROKE_WIDTH * 2
+
 export function edgeEndpoint(fx: number, fy: number, tx: number, ty: number): { x: number; y: number } {
   const dx = fx - tx
   const dy = fy - ty
@@ -42,7 +45,7 @@ export function setPulse(rect: SVGRectElement, active: boolean): void {
     const anim = svgEl('animate')
     anim.dataset.role = 'pulse'
     anim.setAttribute('attributeName', 'stroke-width')
-    anim.setAttribute('values', '1.5;3;1.5')
+    anim.setAttribute('values', `${NODE_STROKE_WIDTH};${SELECTED_NODE_STROKE_WIDTH};${NODE_STROKE_WIDTH}`)
     anim.setAttribute('dur', '1s')
     anim.setAttribute('repeatCount', 'indefinite')
     anim.setAttribute('calcMode', 'spline')
@@ -51,7 +54,7 @@ export function setPulse(rect: SVGRectElement, active: boolean): void {
     rect.appendChild(anim)
   } else if (!active && existing) {
     existing.remove()
-    rect.setAttribute('stroke-width', '1.5')
+    rect.setAttribute('stroke-width', String(NODE_STROKE_WIDTH))
   }
 }
 
@@ -88,7 +91,7 @@ export function makeNodeEl(node: Node, borderColor = '#4b5563', pulse = false): 
   rect.setAttribute('rx', '8')
   rect.setAttribute('fill', '#1f2937')
   rect.setAttribute('stroke', borderColor)
-  rect.setAttribute('stroke-width', '1.5')
+  rect.setAttribute('stroke-width', String(NODE_STROKE_WIDTH))
 
   const text = svgEl('text')
   text.setAttribute('x', '60')

@@ -1,5 +1,15 @@
 import type { Graph, GraphAPI, Node } from '../types'
-import { svgEl, edgeEndpoint, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady, setPulse } from './utils'
+import {
+  svgEl,
+  edgeEndpoint,
+  makeEdgePath,
+  makeNodeEl,
+  nodeBorderColor,
+  nodeIsReady,
+  setPulse,
+  NODE_STROKE_WIDTH,
+  SELECTED_NODE_STROKE_WIDTH,
+} from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
 
 const DRAG_THRESHOLD = 4
@@ -80,15 +90,20 @@ export function addInteraction(
         setNeighborAnimation(rect, null)
         setPulse(rect, false)
         rect.setAttribute('stroke', SELECTED_STROKE)
+        rect.setAttribute('stroke-width', String(SELECTED_NODE_STROKE_WIDTH))
       } else if (neighborIds.has(node.id)) {
         setPulse(rect, false)
         const normalColor = nodeBorderColor(node, graph.edges, nodeMap)
         rect.setAttribute('stroke', normalColor)
+        rect.setAttribute('stroke-width', String(NODE_STROKE_WIDTH))
         setNeighborAnimation(rect, normalColor)
       } else {
         setNeighborAnimation(rect, null)
         rect.setAttribute('stroke', nodeBorderColor(node, graph.edges, nodeMap))
         setPulse(rect, nodeIsReady(node, graph.edges, nodeMap))
+        if (!nodeIsReady(node, graph.edges, nodeMap)) {
+          rect.setAttribute('stroke-width', String(NODE_STROKE_WIDTH))
+        }
       }
     }
 
@@ -296,7 +311,7 @@ export function addInteraction(
     rectEl.setAttribute('stroke', '#388bfd')
     rectEl.setAttribute('stroke-width', '2.5')
     setTimeout(() => {
-      rectEl.setAttribute('stroke-width', '1.5')
+      rectEl.setAttribute('stroke-width', String(NODE_STROKE_WIDTH))
       refreshHighlights()
     }, 700)
   }
