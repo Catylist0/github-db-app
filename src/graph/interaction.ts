@@ -607,6 +607,10 @@ export function addInteraction(
           if (selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {
             toggleEdge([...selectedNodes][0], nodeId)
           }
+        } else if (e.shiftKey) {
+          if (selectedNodes.has(nodeId)) selectedNodes.delete(nodeId)
+          else selectedNodes.add(nodeId)
+          refreshHighlights()
         } else {
           clearSelection()
           selectNode(nodeId)
