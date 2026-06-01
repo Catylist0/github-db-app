@@ -4,7 +4,6 @@ import { showPanel, hidePanel } from '../ui/panel'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
-const NEIGHBOR_STROKE = '#388bfd'
 
 export function addInteraction(
   svg: SVGSVGElement,
@@ -40,6 +39,29 @@ export function addInteraction(
     return nodeG.querySelector('rect')!
   }
 
+  function setNeighborAnimation(rect: SVGRectElement, normalColor: string | null): void {
+    const existing = rect.querySelector<SVGAnimateElement>('animate[data-role="neighbor"]')
+    if (normalColor !== null) {
+      const values = `${normalColor};${SELECTED_STROKE};${normalColor}`
+      if (existing) {
+        existing.setAttribute('values', values)
+      } else {
+        const anim = svgEl('animate')
+        anim.dataset.role = 'neighbor'
+        anim.setAttribute('attributeName', 'stroke')
+        anim.setAttribute('values', values)
+        anim.setAttribute('dur', '1s')
+        anim.setAttribute('repeatCount', 'indefinite')
+        anim.setAttribute('calcMode', 'spline')
+        anim.setAttribute('keyTimes', '0;0.5;1')
+        anim.setAttribute('keySplines', '0.5 0 0.5 1;0.5 0 0.5 1')
+        rect.appendChild(anim)
+      }
+    } else if (existing) {
+      existing.remove()
+    }
+  }
+
   function refreshHighlights(): void {
     const neighborIds = new Set<string>()
     for (const selId of selectedNodes) {
@@ -55,12 +77,16 @@ export function addInteraction(
       if (!g) continue
       const rect = nodeRect(g)
       if (selectedNodes.has(node.id)) {
+        setNeighborAnimation(rect, null)
         setPulse(rect, false)
         rect.setAttribute('stroke', SELECTED_STROKE)
       } else if (neighborIds.has(node.id)) {
         setPulse(rect, false)
-        rect.setAttribute('stroke', NEIGHBOR_STROKE)
+        const normalColor = nodeBorderColor(node, graph.edges, nodeMap)
+        rect.setAttribute('stroke', normalColor)
+        setNeighborAnimation(rect, normalColor)
       } else {
+        setNeighborAnimation(rect, null)
         rect.setAttribute('stroke', nodeBorderColor(node, graph.edges, nodeMap))
         setPulse(rect, nodeIsReady(node, graph.edges, nodeMap))
       }

@@ -37,9 +37,10 @@ export function nodeBorderColor(node: Node, edges: Edge[], nodeMap: Map<string, 
 }
 
 export function setPulse(rect: SVGRectElement, active: boolean): void {
-  const existing = rect.querySelector('animate')
+  const existing = rect.querySelector('animate[data-role="pulse"]')
   if (active && !existing) {
     const anim = svgEl('animate')
+    anim.dataset.role = 'pulse'
     anim.setAttribute('attributeName', 'stroke-width')
     anim.setAttribute('values', '1.5;3;1.5')
     anim.setAttribute('dur', '1s')
