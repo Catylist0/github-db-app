@@ -5,7 +5,7 @@ import { hidePanel } from './ui/panel'
 import { hideSearchPanel, toggleSearchPanel, isSearchPanelOpen } from './ui/search'
 import type { Graph } from './types'
 
-let _controls: { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void } | null = null
+let _controls: { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } | null = null
 let _username: string | null = null
 let _authHeader: HTMLElement | null = null
 let _graph: Graph | null = null
@@ -167,13 +167,29 @@ async function init(): Promise<void> {
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e: KeyboardEvent) => {
+    const ae = document.activeElement
+    const typing = ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement
+
+    if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !typing) {
+      e.preventDefault()
+      if (e.shiftKey) _controls?.redo()
+      else _controls?.undo()
+      return
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'y' && !typing) {
+      e.preventDefault()
+      _controls?.redo()
+      return
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault()
       toggleSearchPanel(
         () => _graph?.nodes ?? [],
         (node) => _controls?.centerOnNode(node.id),
       )
-    } else if (e.key === 'Escape' && isSearchPanelOpen()) {
+      return
+    }
+    if (e.key === 'Escape' && isSearchPanelOpen()) {
       hideSearchPanel()
     }
   })

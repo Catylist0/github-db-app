@@ -1,4 +1,4 @@
-import type { Graph, GraphAPI, Node } from '../types'
+import type { Graph, GraphAPI, Node, Edge } from '../types'
 import {
   svgEl,
   edgeEndpoint,
@@ -11,6 +11,8 @@ import {
   SELECTED_NODE_STROKE_WIDTH,
 } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
+import { record, popUndo, pushRedo, popRedo, pushUndo, clearHistory } from '../history/stack'
+import type { HistoryEntry } from '../history/stack'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
@@ -20,7 +22,7 @@ export function addInteraction(
   viewport: SVGGElement,
   graph: Graph,
   api: GraphAPI,
-): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void } {
+): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } {
   svg.style.userSelect = 'none'
 
   const state = { tx: 0, ty: 0, scale: 1 }
@@ -148,19 +150,92 @@ export function addInteraction(
     }
   }
 
+  // ── Internal graph/DOM mutations (no history recording) ────────────────────
+
+  function internalAddNode(node: Node): void {
+    if (graph.nodes.some(n => n.id === node.id)) return
+    graph.nodes.push(node)
+    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
+    viewport.appendChild(
+      makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)),
+    )
+    api.upsertNode(node).catch(console.error)
+  }
+
+  function internalRemoveNode(id: string): void {
+    const idx = graph.nodes.findIndex(n => n.id === id)
+    if (idx >= 0) graph.nodes.splice(idx, 1)
+    graph.edges = graph.edges.filter(e => e.from !== id && e.to !== id)
+    viewport.querySelector(`[data-node-id="${id}"]`)?.remove()
+    viewport.querySelectorAll<SVGPathElement>(`[data-from="${id}"],[data-to="${id}"]`).forEach(p => p.remove())
+    api.deleteNode(id).catch(console.error)
+  }
+
+  function internalAddEdge(edge: Edge): void {
+    if (graph.edges.some(e => e.id === edge.id)) return
+    const fromEl = viewport.querySelector(`[data-node-id="${edge.from}"]`)
+    const toEl = viewport.querySelector(`[data-node-id="${edge.to}"]`)
+    if (!fromEl || !toEl) return
+    graph.edges.push(edge)
+    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to)
+    viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
+    api.upsertEdge(edge).catch(console.error)
+  }
+
+  function internalRemoveEdge(edgeId: string): void {
+    const idx = graph.edges.findIndex(e => e.id === edgeId)
+    if (idx < 0) return
+    const [edge] = graph.edges.splice(idx, 1)
+    viewport.querySelector(`[data-from="${edge.from}"][data-to="${edge.to}"]`)?.remove()
+    api.deleteEdge(edge.id).catch(console.error)
+  }
+
+  function internalMoveNode(id: string, pos: { x: number; y: number }): void {
+    const node = graph.nodes.find(n => n.id === id)
+    if (!node) return
+    node.x = pos.x
+    node.y = pos.y
+    const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
+    if (g) {
+      g.dataset.cx = String(pos.x)
+      g.dataset.cy = String(pos.y)
+      g.setAttribute('transform', `translate(${pos.x - 60},${pos.y - 20})`)
+      updateEdgesForNode(id)
+    }
+    api.upsertNode(node).catch(console.error)
+  }
+
+  function internalUpdateNode(
+    id: string,
+    patch: Partial<Pick<Node, 'label' | 'status' | 'description'>>,
+  ): void {
+    const node = graph.nodes.find(n => n.id === id)
+    if (!node) return
+    Object.assign(node, patch)
+    if (patch.label !== undefined) {
+      const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
+      if (textEl) textEl.textContent = patch.label
+    }
+    if (patch.status !== undefined) refreshHighlights()
+    api.upsertNode(node).catch(console.error)
+  }
+
+  // ── Edge toggle ────────────────────────────────────────────────────────────
+
   function toggleEdge(fromId: string, toId: string): void {
     const existingIdx = graph.edges.findIndex(e => e.from === fromId && e.to === toId)
     if (existingIdx >= 0) {
       const [removed] = graph.edges.splice(existingIdx, 1)
       viewport.querySelector(`[data-from="${fromId}"][data-to="${toId}"]`)?.remove()
       api.deleteEdge(removed.id).catch(console.error)
+      record({ type: 'delete-edge', edge: { ...removed } })
     } else {
-      const edge = { id: `${fromId}-${toId}`, from: fromId, to: toId }
+      const edge: Edge = { id: `${fromId}-${toId}`, from: fromId, to: toId }
       graph.edges.push(edge)
       const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId)
-      const firstNode = viewport.querySelector<SVGGElement>('[data-node-id]')
-      viewport.insertBefore(path, firstNode)
+      viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
       api.upsertEdge(edge).catch(console.error)
+      record({ type: 'create-edge', edge: { ...edge } })
     }
     refreshHighlights()
   }
@@ -168,15 +243,14 @@ export function addInteraction(
   // ── Panel helpers ──────────────────────────────────────────────────────────
 
   function handleDeleteNode(id: string): void {
-    api.deleteNode(id).catch(console.error)
+    const node = graph.nodes.find(n => n.id === id)
+    if (!node) return
+    const edges = graph.edges.filter(e => e.from === id || e.to === id)
+    record({ type: 'delete-node', node: { ...node }, edges: edges.map(e => ({ ...e })) })
     hidePanel()
-    const idx = graph.nodes.findIndex(n => n.id === id)
-    if (idx >= 0) graph.nodes.splice(idx, 1)
-    graph.edges = graph.edges.filter(e => e.from !== id && e.to !== id)
-    viewport.querySelector(`[data-node-id="${id}"]`)?.remove()
-    viewport.querySelectorAll<SVGPathElement>(`[data-from="${id}"],[data-to="${id}"]`)
-      .forEach(p => p.remove())
+    internalRemoveNode(id)
     clearSelection()
+    refreshHighlights()
   }
 
   function openPanel(node: Node, autoFocusName = false): void {
@@ -185,6 +259,12 @@ export function addInteraction(
     showPanel(
       node,
       isReadonly ? () => {} : (updated) => {
+        if (updated.label !== undefined)
+          record({ type: 'rename-node', id, from: node.label, to: updated.label })
+        if (updated.status !== undefined)
+          record({ type: 'status-node', id, from: node.status, to: updated.status })
+        if (updated.description !== undefined)
+          record({ type: 'description-node', id, from: node.description, to: updated.description })
         Object.assign(node, updated)
         if (updated.label !== undefined) {
           const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
@@ -249,17 +329,13 @@ export function addInteraction(
       y: Math.round(vp.y),
       status: 'planned',
     }
-    graph.nodes.push(node)
-    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
-    viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)))
-    api.upsertNode(node).catch(console.error)
+    internalAddNode(node)
+    record({ type: 'create-node', node: { ...node } })
 
     if (fromId) {
-      const edge = { id: `${fromId}-${node.id}`, from: fromId, to: node.id }
-      graph.edges.push(edge)
-      const path = makeEdgePath(getNodePos(fromId), getNodePos(node.id), fromId, node.id)
-      viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
-      api.upsertEdge(edge).catch(console.error)
+      const edge: Edge = { id: `${fromId}-${node.id}`, from: fromId, to: node.id }
+      internalAddEdge(edge)
+      record({ type: 'create-edge', edge: { ...edge } })
       refreshHighlights()
     }
 
@@ -271,13 +347,74 @@ export function addInteraction(
     }
   }
 
+  // ── Undo / redo ────────────────────────────────────────────────────────────
+
+  function applyEntry(entry: HistoryEntry, dir: 'undo' | 'redo'): void {
+    hidePanel()
+    clearSelection()
+    switch (entry.type) {
+      case 'create-node':
+        if (dir === 'undo') internalRemoveNode(entry.node.id)
+        else internalAddNode({ ...entry.node })
+        break
+      case 'delete-node':
+        if (dir === 'undo') {
+          internalAddNode({ ...entry.node })
+          for (const e of entry.edges) internalAddEdge({ ...e })
+        } else {
+          internalRemoveNode(entry.node.id)
+        }
+        break
+      case 'move-nodes':
+        for (const m of entry.moves) internalMoveNode(m.id, dir === 'undo' ? m.from : m.to)
+        break
+      case 'rename-node':
+        internalUpdateNode(entry.id, { label: dir === 'undo' ? entry.from : entry.to })
+        break
+      case 'status-node':
+        internalUpdateNode(entry.id, { status: dir === 'undo' ? entry.from : entry.to })
+        break
+      case 'description-node':
+        internalUpdateNode(entry.id, { description: dir === 'undo' ? entry.from : entry.to })
+        break
+      case 'create-edge':
+        if (dir === 'undo') internalRemoveEdge(entry.edge.id)
+        else internalAddEdge({ ...entry.edge })
+        break
+      case 'delete-edge':
+        if (dir === 'undo') internalAddEdge({ ...entry.edge })
+        else internalRemoveEdge(entry.edge.id)
+        break
+    }
+    refreshHighlights()
+  }
+
+  function performUndo(): void {
+    if (!authenticated) return
+    const entry = popUndo()
+    if (!entry) return
+    applyEntry(entry, 'undo')
+    pushRedo(entry)
+  }
+
+  function performRedo(): void {
+    if (!authenticated) return
+    const entry = popRedo()
+    if (!entry) return
+    applyEntry(entry, 'redo')
+    pushUndo(entry)
+  }
+
   // ── Public controls ───────────────────────────────────────────────────────
 
   function setAuthenticated(auth: boolean): void {
     authenticated = auth
     addBtn.style.display = auth ? 'flex' : 'none'
-    if (!auth) setAddMode(false)
-    hidePanel() // close panel on auth change to avoid stale edit/readonly state
+    if (!auth) {
+      setAddMode(false)
+      clearHistory()
+    }
+    hidePanel()
   }
 
   function centerOnNode(id: string): void {
@@ -449,17 +586,20 @@ export function addInteraction(
   window.addEventListener('mouseup', (e: MouseEvent) => {
     if (activeNode) {
       if (hasDragged) {
-        // Persist new positions (only reachable when authenticated)
         const moved = isMultiDrag ? [...multiDragOrigins.keys()] : [activeNode.dataset.nodeId!]
+        const moveRecords: Array<{ id: string; from: { x: number; y: number }; to: { x: number; y: number } }> = []
         for (const id of moved) {
           const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
           const node = graph.nodes.find(n => n.id === id)
           if (node) {
+            const origin = isMultiDrag ? multiDragOrigins.get(id)! : singleDragOrigin
+            moveRecords.push({ id, from: { x: origin.cx, y: origin.cy }, to: { x: Number(g.dataset.cx), y: Number(g.dataset.cy) } })
             node.x = Number(g.dataset.cx)
             node.y = Number(g.dataset.cy)
             api.upsertNode(node).catch(console.error)
           }
         }
+        if (moveRecords.length > 0) record({ type: 'move-nodes', moves: moveRecords })
       } else {
         // Click: open panel (read-only or edit depending on auth)
         const nodeId = activeNode.dataset.nodeId!
@@ -543,5 +683,5 @@ export function addInteraction(
     applyTransform()
   }, { passive: false })
 
-  return { setAuthenticated, centerOnNode }
+  return { setAuthenticated, centerOnNode, undo: performUndo, redo: performRedo }
 }
