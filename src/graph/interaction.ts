@@ -197,8 +197,10 @@ export function addInteraction(
 
   let pendingAddPos: { x: number; y: number } | null = null
   let pendingAddClientStart = { x: 0, y: 0 }
+  let pendingCtrlAddPos: { x: number; y: number } | null = null
+  let pendingCtrlAddClientStart = { x: 0, y: 0 }
 
-  function createNodeAt(vp: { x: number; y: number }, shiftHeld: boolean): void {
+  function createNodeAt(vp: { x: number; y: number }, shiftHeld: boolean, fromId?: string): void {
     const node: Node = {
       id: crypto.randomUUID(),
       label: 'Unnamed',
@@ -210,6 +212,15 @@ export function addInteraction(
     const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
     viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)))
     api.upsertNode(node).catch(console.error)
+
+    if (fromId) {
+      const edge = { id: `${fromId}-${node.id}`, from: fromId, to: node.id }
+      graph.edges.push(edge)
+      const path = makeEdgePath(getNodePos(fromId), getNodePos(node.id), fromId, node.id)
+      viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
+      api.upsertEdge(edge).catch(console.error)
+      refreshAllBorders()
+    }
 
     if (!shiftHeld) {
       setAddMode(false)
@@ -321,6 +332,9 @@ export function addInteraction(
     if (addMode) {
       pendingAddPos = clientToViewport(me.clientX, me.clientY)
       pendingAddClientStart = { x: me.clientX, y: me.clientY }
+    } else if (authenticated && me.ctrlKey && selectedNodes.size === 1) {
+      pendingCtrlAddPos = clientToViewport(me.clientX, me.clientY)
+      pendingCtrlAddClientStart = { x: me.clientX, y: me.clientY }
     } else if (me.shiftKey) {
       boxSelecting = true
       boxVpStart = clientToViewport(me.clientX, me.clientY)
@@ -427,6 +441,16 @@ export function addInteraction(
       activeNode = null
       isMultiDrag = false
       hasDragged = false
+      return
+    }
+
+    if (pendingCtrlAddPos) {
+      const dx = e.clientX - pendingCtrlAddClientStart.x
+      const dy = e.clientY - pendingCtrlAddClientStart.y
+      if (Math.sqrt(dx * dx + dy * dy) <= DRAG_THRESHOLD) {
+        createNodeAt(pendingCtrlAddPos, false, [...selectedNodes][0])
+      }
+      pendingCtrlAddPos = null
       return
     }
 
