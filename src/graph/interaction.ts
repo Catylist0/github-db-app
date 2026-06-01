@@ -4,6 +4,7 @@ import { showPanel, hidePanel } from '../ui/panel'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
+const NEIGHBOR_STROKE = '#388bfd'
 
 export function addInteraction(
   svg: SVGSVGElement,
@@ -39,50 +40,48 @@ export function addInteraction(
     return nodeG.querySelector('rect')!
   }
 
-  function selectNode(id: string): void {
-    selectedNodes.add(id)
-    const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
-    if (g) {
-      const rect = nodeRect(g)
-      setPulse(rect, false)
-      rect.setAttribute('stroke', SELECTED_STROKE)
+  function refreshHighlights(): void {
+    const neighborIds = new Set<string>()
+    for (const selId of selectedNodes) {
+      for (const edge of graph.edges) {
+        if (edge.from === selId && !selectedNodes.has(edge.to)) neighborIds.add(edge.to)
+        if (edge.to === selId && !selectedNodes.has(edge.from)) neighborIds.add(edge.from)
+      }
     }
-  }
 
-  function computedBorder(nodeId: string): string {
-    const node = graph.nodes.find(n => n.id === nodeId)
-    if (!node) return '#4b5563'
-    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
-    return nodeBorderColor(node, graph.edges, nodeMap)
-  }
-
-  function refreshAllBorders(): void {
     const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
     for (const node of graph.nodes) {
-      if (selectedNodes.has(node.id)) continue
       const g = viewport.querySelector<SVGGElement>(`[data-node-id="${node.id}"]`)
       if (!g) continue
       const rect = nodeRect(g)
-      rect.setAttribute('stroke', nodeBorderColor(node, graph.edges, nodeMap))
-      setPulse(rect, nodeIsReady(node, graph.edges, nodeMap))
+      if (selectedNodes.has(node.id)) {
+        setPulse(rect, false)
+        rect.setAttribute('stroke', SELECTED_STROKE)
+      } else if (neighborIds.has(node.id)) {
+        setPulse(rect, false)
+        rect.setAttribute('stroke', NEIGHBOR_STROKE)
+      } else {
+        rect.setAttribute('stroke', nodeBorderColor(node, graph.edges, nodeMap))
+        setPulse(rect, nodeIsReady(node, graph.edges, nodeMap))
+      }
+    }
+
+    const hasSelection = selectedNodes.size > 0
+    for (const path of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
+      const hl = hasSelection && (selectedNodes.has(path.dataset.from!) || selectedNodes.has(path.dataset.to!))
+      path.setAttribute('stroke', hl ? '#e6edf3' : '#444')
+      path.setAttribute('marker-end', hl ? 'url(#arrowhead-hl)' : 'url(#arrowhead)')
     }
   }
 
-  function deselectNode(id: string): void {
-    selectedNodes.delete(id)
-    const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
-    if (!g) return
-    const rect = nodeRect(g)
-    rect.setAttribute('stroke', computedBorder(id))
-    const node = graph.nodes.find(n => n.id === id)
-    if (node) {
-      const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
-      setPulse(rect, nodeIsReady(node, graph.edges, nodeMap))
-    }
+  function selectNode(id: string): void {
+    selectedNodes.add(id)
+    refreshHighlights()
   }
 
   function clearSelection(): void {
-    for (const id of [...selectedNodes]) deselectNode(id)
+    selectedNodes.clear()
+    refreshHighlights()
   }
 
   // ── Edge helpers ───────────────────────────────────────────────────────────
@@ -122,6 +121,7 @@ export function addInteraction(
       viewport.insertBefore(path, firstNode)
       api.upsertEdge(edge).catch(console.error)
     }
+    refreshHighlights()
   }
 
   // ── Panel helpers ──────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ export function addInteraction(
           const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
           if (textEl) textEl.textContent = updated.label
         }
-        if (updated.status !== undefined) refreshAllBorders()
+        if (updated.status !== undefined) refreshHighlights()
         api.upsertNode(node).catch(console.error)
       },
       clearSelection,
@@ -219,7 +219,7 @@ export function addInteraction(
       const path = makeEdgePath(getNodePos(fromId), getNodePos(node.id), fromId, node.id)
       viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
       api.upsertEdge(edge).catch(console.error)
-      refreshAllBorders()
+      refreshHighlights()
     }
 
     if (!shiftHeld) {
@@ -270,12 +270,8 @@ export function addInteraction(
     rectEl.setAttribute('stroke', '#388bfd')
     rectEl.setAttribute('stroke-width', '2.5')
     setTimeout(() => {
-      const node = graph.nodes.find(n => n.id === id)
-      if (!node) return
-      const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
-      rectEl.setAttribute('stroke', selectedNodes.has(id) ? SELECTED_STROKE : nodeBorderColor(node, graph.edges, nodeMap))
       rectEl.setAttribute('stroke-width', '1.5')
-      if (!selectedNodes.has(id)) setPulse(rectEl, nodeIsReady(node, graph.edges, nodeMap))
+      refreshHighlights()
     }, 700)
   }
 
@@ -470,14 +466,15 @@ export function addInteraction(
         const y1 = Number(boxEl.getAttribute('y'))
         const x2 = x1 + Number(boxEl.getAttribute('width'))
         const y2 = y1 + Number(boxEl.getAttribute('height'))
-        clearSelection()
+        selectedNodes.clear()
         for (const g of viewport.querySelectorAll<SVGGElement>('[data-node-id]')) {
           const cx = Number(g.dataset.cx)
           const cy = Number(g.dataset.cy)
           if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
-            selectNode(g.dataset.nodeId!)
+            selectedNodes.add(g.dataset.nodeId!)
           }
         }
+        refreshHighlights()
         boxEl.remove()
         boxEl = null
       }

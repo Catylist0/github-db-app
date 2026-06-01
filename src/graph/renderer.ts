@@ -28,6 +28,19 @@ export function renderGraph(
   arrowPoly.setAttribute('fill', '#444')
   marker.appendChild(arrowPoly)
   defs.appendChild(marker)
+
+  const markerHl = svgEl('marker')
+  markerHl.id = 'arrowhead-hl'
+  markerHl.setAttribute('markerWidth', '10')
+  markerHl.setAttribute('markerHeight', '7')
+  markerHl.setAttribute('refX', '10')
+  markerHl.setAttribute('refY', '3.5')
+  markerHl.setAttribute('orient', 'auto')
+  const arrowPolyHl = svgEl('polygon')
+  arrowPolyHl.setAttribute('points', '0 0, 10 3.5, 0 7')
+  arrowPolyHl.setAttribute('fill', '#e6edf3')
+  markerHl.appendChild(arrowPolyHl)
+  defs.appendChild(markerHl)
   svg.appendChild(defs)
 
   const viewport = svgEl('g')
