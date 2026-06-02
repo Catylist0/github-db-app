@@ -60,10 +60,13 @@ export function setPulse(rect: SVGRectElement, active: boolean): void {
 
 // ── Edge geometry ─────────────────────────────────────────────────────────────
 
+export type Seg = { x1: number; y1: number; x2: number; y2: number }
+
 export interface EdgeGeometry {
   d: string
   midX: number
   midY: number
+  segments: Seg[]
 }
 
 export function computeEdgeGeometry(
@@ -78,11 +81,19 @@ export function computeEdgeGeometry(
     const dx = tc.x - fc.x
     const dy = tc.y - fc.y
     const bend = Math.abs(dx) >= Math.abs(dy)
-      ? { x: tc.x, y: fc.y }   // H then V
-      : { x: fc.x, y: tc.y }   // V then H
+      ? { x: tc.x, y: fc.y }
+      : { x: fc.x, y: tc.y }
     const start = edgeEndpoint(bend.x, bend.y, fc.x, fc.y)
     const end = edgeEndpoint(bend.x, bend.y, tc.x, tc.y)
-    return { d: `M ${start.x} ${start.y} L ${bend.x} ${bend.y} L ${end.x} ${end.y}`, midX: bend.x, midY: bend.y }
+    return {
+      d: `M ${start.x} ${start.y} L ${bend.x} ${bend.y} L ${end.x} ${end.y}`,
+      midX: bend.x,
+      midY: bend.y,
+      segments: [
+        { x1: start.x, y1: start.y, x2: bend.x, y2: bend.y },
+        { x1: bend.x, y1: bend.y, x2: end.x, y2: end.y },
+      ],
+    }
   }
 
   if (routing === 'elbow2') {
@@ -95,16 +106,32 @@ export function computeEdgeGeometry(
       d: `M ${start.x} ${start.y} L ${bend1.x} ${bend1.y} L ${bend2.x} ${bend2.y} L ${end.x} ${end.y}`,
       midX,
       midY: (fc.y + tc.y) / 2,
+      segments: [
+        { x1: start.x, y1: start.y, x2: bend1.x, y2: bend1.y },
+        { x1: bend1.x, y1: bend1.y, x2: bend2.x, y2: bend2.y },
+        { x1: bend2.x, y1: bend2.y, x2: end.x, y2: end.y },
+      ],
     }
   }
 
   // straight
   const start = edgeEndpoint(tc.x, tc.y, fc.x, fc.y)
   const end = edgeEndpoint(fc.x, fc.y, tc.x, tc.y)
-  return { d: `M ${start.x} ${start.y} L ${end.x} ${end.y}`, midX: (start.x + end.x) / 2, midY: (start.y + end.y) / 2 }
+  return {
+    d: `M ${start.x} ${start.y} L ${end.x} ${end.y}`,
+    midX: (start.x + end.x) / 2,
+    midY: (start.y + end.y) / 2,
+    segments: [{ x1: start.x, y1: start.y, x2: end.x, y2: end.y }],
+  }
 }
 
-// ── Vanish gradient ───────────────────────────────────────────────────────────
+// ── Vanish mask ───────────────────────────────────────────────────────────────
+
+// Fade starts this far before the intersection so the line is already fully
+// gone by the time it would overlap. Buffer is the fully-transparent zone
+// added on each side of the actual intersection; fade is the gradual transition.
+const VANISH_BUFFER = 14   // px of fully-invisible zone around intersection
+const VANISH_FADE = 28     // px of gradient transition into/out of invisible zone
 
 function lineBoxIntersect(
   ax: number, ay: number, bx: number, by: number,
@@ -126,63 +153,168 @@ function lineBoxIntersect(
   return tIn <= tOut ? { tIn, tOut } : null
 }
 
-export function buildVanishGradient(
+function segIntersectT(
+  p1x: number, p1y: number, p2x: number, p2y: number,
+  p3x: number, p3y: number, p4x: number, p4y: number,
+): number | null {
+  const d1x = p2x - p1x, d1y = p2y - p1y
+  const d2x = p4x - p3x, d2y = p4y - p3y
+  const cross = d1x * d2y - d1y * d2x
+  if (Math.abs(cross) < 1e-10) return null
+  const dx = p3x - p1x, dy = p3y - p1y
+  const t = (dx * d2y - dy * d2x) / cross
+  const s = (dx * d1y - dy * d1x) / cross
+  return t >= 0 && t <= 1 && s >= 0 && s <= 1 ? t : null
+}
+
+// Returns mask element (in defs, caller must append to defs).
+// Returns null if no intersections found — caller should remove any existing mask.
+export function buildVanishMask(
   edgeId: string,
-  startX: number, startY: number,
-  endX: number, endY: number,
-  fromId: string, toId: string,
+  mySegs: Seg[],
+  fromId: string,
+  toId: string,
   allNodes: Node[],
-  color: string,
-): SVGLinearGradientElement | null {
-  type Interval = { tIn: number; tOut: number }
-  const intervals: Interval[] = []
-
-  for (const n of allNodes) {
-    if (n.id === fromId || n.id === toId) continue
-    const hit = lineBoxIntersect(startX, startY, endX, endY, n.x - NODE_HW, n.y - NODE_HH, NODE_HW * 2, NODE_HH * 2)
-    if (hit) intervals.push(hit)
+  otherEdgeSegs: Seg[][],
+  defs: SVGDefsElement,
+): SVGMaskElement | null {
+  // Collect all [tIn, tOut] fade intervals per segment (in t coords 0..1 of segment)
+  type FadeRect = {
+    startX: number; startY: number
+    endX: number; endY: number
+    totalLen: number; fadeFrac: number
   }
+  const rects: FadeRect[] = []
 
-  if (intervals.length === 0) return null
+  for (const seg of mySegs) {
+    const dx = seg.x2 - seg.x1, dy = seg.y2 - seg.y1
+    const L = Math.sqrt(dx * dx + dy * dy)
+    if (L < 1) continue
 
-  intervals.sort((a, b) => a.tIn - b.tIn)
-  const merged: Interval[] = []
-  for (const iv of intervals) {
-    if (merged.length > 0 && iv.tIn <= merged[merged.length - 1].tOut) {
-      merged[merged.length - 1].tOut = Math.max(merged[merged.length - 1].tOut, iv.tOut)
-    } else {
-      merged.push({ ...iv })
+    type Iv = { tIn: number; tOut: number }
+    const intervals: Iv[] = []
+
+    // Node bbox intersections
+    for (const n of allNodes) {
+      if (n.id === fromId || n.id === toId) continue
+      const hit = lineBoxIntersect(seg.x1, seg.y1, seg.x2, seg.y2, n.x - NODE_HW, n.y - NODE_HH, NODE_HW * 2, NODE_HH * 2)
+      if (hit) intervals.push(hit)
+    }
+
+    // Edge-segment intersections — treat each crossing as a zero-width interval
+    for (const otherSeg of otherEdgeSegs) {
+      for (const os of otherSeg) {
+        const t = segIntersectT(seg.x1, seg.y1, seg.x2, seg.y2, os.x1, os.y1, os.x2, os.y2)
+        if (t !== null) {
+          const hw = VANISH_BUFFER / L
+          intervals.push({ tIn: t - hw, tOut: t + hw })
+        }
+      }
+    }
+
+    if (intervals.length === 0) continue
+
+    // Sort and merge overlapping intervals
+    intervals.sort((a, b) => a.tIn - b.tIn)
+    const merged: Iv[] = []
+    for (const iv of intervals) {
+      if (merged.length > 0 && iv.tIn <= merged[merged.length - 1].tOut) {
+        merged[merged.length - 1].tOut = Math.max(merged[merged.length - 1].tOut, iv.tOut)
+      } else {
+        merged.push({ ...iv })
+      }
+    }
+
+    for (const iv of merged) {
+      // Zone: fully invisible from (tIn - BUFFER/L) to (tOut + BUFFER/L)
+      // Fade starts FADE pixels before that, ends FADE pixels after
+      const fadeInStart = Math.max(0, iv.tIn - (VANISH_BUFFER + VANISH_FADE) / L)
+      const zoneEnd = Math.min(1, iv.tOut + (VANISH_BUFFER + VANISH_FADE) / L)
+
+      const startX = seg.x1 + fadeInStart * dx
+      const startY = seg.y1 + fadeInStart * dy
+      const endX = seg.x1 + zoneEnd * dx
+      const endY = seg.y1 + zoneEnd * dy
+
+      const zdx = endX - startX, zdy = endY - startY
+      const totalLen = Math.sqrt(zdx * zdx + zdy * zdy)
+      if (totalLen < 1) continue
+
+      // fadeFrac: fraction of total zone taken by one fade ramp.
+      // The invisible zone occupies (1 - 2*fadeFrac) of the total.
+      const fadeFrac = Math.min(0.49, VANISH_FADE / totalLen)
+
+      rects.push({ startX, startY, endX, endY, totalLen, fadeFrac })
     }
   }
 
-  const FADE = 0.04
-  const stops: Array<{ offset: number; opacity: number }> = [{ offset: 0, opacity: 1 }]
-  for (const iv of merged) {
-    stops.push({ offset: Math.max(0, iv.tIn - FADE), opacity: 1 })
-    stops.push({ offset: iv.tIn, opacity: 0 })
-    stops.push({ offset: iv.tOut, opacity: 0 })
-    stops.push({ offset: Math.min(1, iv.tOut + FADE), opacity: 1 })
-  }
-  stops.push({ offset: 1, opacity: 1 })
-  stops.sort((a, b) => a.offset - b.offset)
+  if (rects.length === 0) return null
 
-  const grad = svgEl('linearGradient')
-  grad.id = `vg-${edgeId}`
-  grad.setAttribute('gradientUnits', 'userSpaceOnUse')
-  grad.setAttribute('x1', String(startX))
-  grad.setAttribute('y1', String(startY))
-  grad.setAttribute('x2', String(endX))
-  grad.setAttribute('y2', String(endY))
+  // Remove any old gradients for this edge from defs
+  cleanupVanishDefs(edgeId, defs)
 
-  for (const s of stops) {
-    const stop = svgEl('stop')
-    stop.setAttribute('offset', String(s.offset))
-    stop.setAttribute('stop-color', color)
-    stop.setAttribute('stop-opacity', String(s.opacity))
-    grad.appendChild(stop)
-  }
+  const mask = svgEl('mask')
+  mask.id = `vm-${edgeId}`
+  mask.setAttribute('maskUnits', 'userSpaceOnUse')
 
-  return grad
+  // White background: show entire path
+  const bg = svgEl('rect')
+  bg.setAttribute('x', '-99999')
+  bg.setAttribute('y', '-99999')
+  bg.setAttribute('width', '999999')
+  bg.setAttribute('height', '999999')
+  bg.setAttribute('fill', 'white')
+  mask.appendChild(bg)
+
+  // For each fade zone, add a gradient rect in the mask (black = hide)
+  rects.forEach((r, i) => {
+    const gradId = `vm-g-${edgeId}-${i}`
+
+    const grad = svgEl('linearGradient')
+    grad.id = gradId
+    // objectBoundingBox: gradient goes along the rect's width axis regardless of rotation
+    grad.setAttribute('gradientUnits', 'objectBoundingBox')
+    grad.setAttribute('x1', '0')
+    grad.setAttribute('y1', '0')
+    grad.setAttribute('x2', '1')
+    grad.setAttribute('y2', '0')
+
+    const addStop = (offset: number, color: string): void => {
+      const s = svgEl('stop')
+      s.setAttribute('offset', String(offset))
+      s.setAttribute('stop-color', color)
+      grad.appendChild(s)
+    }
+    // white → black → black → white
+    addStop(0, 'white')
+    addStop(r.fadeFrac, 'black')
+    addStop(1 - r.fadeFrac, 'black')
+    addStop(1, 'white')
+
+    defs.appendChild(grad)
+
+    const angle = Math.atan2(r.endY - r.startY, r.endX - r.startX) * 180 / Math.PI
+    const HALF_H = 60  // wide enough to cover the stroke plus some margin
+
+    const rect = svgEl('rect')
+    rect.setAttribute('x', '0')
+    rect.setAttribute('y', String(-HALF_H))
+    rect.setAttribute('width', String(r.totalLen))
+    rect.setAttribute('height', String(HALF_H * 2))
+    rect.setAttribute('fill', `url(#${gradId})`)
+    rect.setAttribute('transform', `translate(${r.startX},${r.startY}) rotate(${angle})`)
+    mask.appendChild(rect)
+  })
+
+  return mask
+}
+
+// Removes the mask element and associated gradients for an edge.
+export function cleanupVanishDefs(edgeId: string, defs: SVGDefsElement): void {
+  defs.querySelector(`#vm-${edgeId}`)?.remove()
+  // Remove per-zone gradients (placed directly in defs)
+  const toRemove = defs.querySelectorAll(`[id^="vm-g-${edgeId}-"]`)
+  toRemove.forEach(el => el.remove())
 }
 
 // ── Edge path element ─────────────────────────────────────────────────────────
@@ -193,45 +325,23 @@ export function makeEdgePath(
   fromId: string,
   toId: string,
   edge?: Partial<Edge>,
-  allNodes?: Node[],
-  defs?: SVGDefsElement,
 ): SVGPathElement {
   const routing: EdgeRouting = edge?.routing ?? 'straight'
-  const style = edge?.style ?? 'solid'
-  const vanish = edge?.vanish ?? false
   const edgeId = edge?.id ?? `${fromId}-${toId}`
-
   const geo = computeEdgeGeometry(fromPos, toPos, routing)
 
   const path = svgEl('path')
   path.setAttribute('d', geo.d)
+  path.setAttribute('stroke', '#444')
   path.setAttribute('stroke-width', '2')
   path.setAttribute('fill', 'none')
   path.setAttribute('marker-end', 'url(#arrowhead)')
+  if (edge?.style === 'dashed') path.setAttribute('stroke-dasharray', '6 4')
   path.dataset.from = fromId
   path.dataset.to = toId
   path.dataset.edgeId = edgeId
   path.dataset.midX = String(geo.midX)
   path.dataset.midY = String(geo.midY)
-
-  if (style === 'dashed') path.setAttribute('stroke-dasharray', '6 4')
-
-  // Vanish gradient (straight edges only for now)
-  if (vanish && routing === 'straight' && allNodes && defs) {
-    const gradId = `vg-${edgeId}`
-    defs.querySelector(`#${gradId}`)?.remove()
-    const start = edgeEndpoint(toPos.x, toPos.y, fromPos.x, fromPos.y)
-    const end = edgeEndpoint(fromPos.x, fromPos.y, toPos.x, toPos.y)
-    const grad = buildVanishGradient(edgeId, start.x, start.y, end.x, end.y, fromId, toId, allNodes, '#444')
-    if (grad) {
-      defs.appendChild(grad)
-      path.setAttribute('stroke', `url(#${gradId})`)
-    } else {
-      path.setAttribute('stroke', '#444')
-    }
-  } else {
-    path.setAttribute('stroke', '#444')
-  }
 
   return path
 }

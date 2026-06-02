@@ -52,7 +52,7 @@ export function renderGraph(
   for (const edge of graph.edges) {
     const from = nodeMap.get(edge.from)!
     const to = nodeMap.get(edge.to)!
-    viewport.appendChild(makeEdgePath(from, to, edge.from, edge.to, edge, graph.nodes, defs))
+    viewport.appendChild(makeEdgePath(from, to, edge.from, edge.to, edge))
   }
 
   for (const node of graph.nodes) {

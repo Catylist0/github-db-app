@@ -94,12 +94,14 @@ export function openEdgeDialog(
     'border-radius:var(--radius);padding:.75rem;font-family:var(--font);' +
     'box-shadow:0 8px 24px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:.6rem;min-width:210px;'
 
-  // Position: center on click point, clamped to viewport
+  // Position: to the left of the edge midpoint so the line stays visible
   document.body.appendChild(dialog)
   const dw = dialog.offsetWidth || 220
   const dh = dialog.offsetHeight || 160
-  const vw = window.innerWidth, vh = window.innerHeight
-  dialog.style.left = `${Math.max(8, Math.min(screenX - dw / 2, vw - dw - 8))}px`
+  const vh = window.innerHeight
+  const GAP = 16
+  const leftX = Math.max(8, screenX - dw - GAP)
+  dialog.style.left = `${leftX}px`
   dialog.style.top = `${Math.max(8, Math.min(screenY - dh / 2, vh - dh - 8))}px`
 
   // ── Routing ──────────────────────────────────────────────────────────────
@@ -202,7 +204,7 @@ export function openEdgeDialog(
   requestAnimationFrame(() => {
     const dw2 = dialog.offsetWidth
     const dh2 = dialog.offsetHeight
-    dialog.style.left = `${Math.max(8, Math.min(screenX - dw2 / 2, vw - dw2 - 8))}px`
+    dialog.style.left = `${Math.max(8, screenX - dw2 - GAP)}px`
     dialog.style.top = `${Math.max(8, Math.min(screenY - dh2 / 2, vh - dh2 - 8))}px`
   })
 
