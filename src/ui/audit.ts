@@ -1,5 +1,5 @@
 import type { Node, AuditEntry } from '../types'
-import { fetchAuditLog } from '../storage/api'
+import { fetchAuditLog, fetchNodeAuditLog } from '../storage/api'
 
 let _panel: HTMLElement | null = null
 let _listEl: HTMLElement | null = null
@@ -75,6 +75,27 @@ function getEntityName(entry: AuditEntry): string {
     }
   } catch { /* ignore */ }
   return entry.entity_id
+}
+
+function getUpdateDetail(entry: AuditEntry): string {
+  if (entry.action !== 'update_node') return ''
+  try {
+    const diff = JSON.parse(entry.diff) as { before: DiffRow; after: DiffRow }
+    const before = diff.before
+    const after = diff.after
+    if (!before || !after) return ''
+    const parts: string[] = []
+    if (before['label'] !== after['label'])
+      parts.push(`renamed → "${after['label']}"`)
+    if (before['status'] !== after['status'])
+      parts.push(`status → ${after['status']}`)
+    if (before['description'] !== after['description'])
+      parts.push('description updated')
+    const dx = Math.abs(Number(after['x']) - Number(before['x']))
+    const dy = Math.abs(Number(after['y']) - Number(before['y']))
+    if (dx > 0.5 || dy > 0.5) parts.push('moved')
+    return parts.join(' · ')
+  } catch { return '' }
 }
 
 function getEdgeSourceId(entry: AuditEntry): string | null {
@@ -160,6 +181,14 @@ function renderEntries(): void {
 
     row.append(metaEl, nameEl)
 
+    const detail = getUpdateDetail(entry)
+    if (detail) {
+      const detailEl = document.createElement('div')
+      detailEl.textContent = detail
+      detailEl.style.cssText = 'color:#484f58;font-size:.75rem;margin-top:.1rem;'
+      row.appendChild(detailEl)
+    }
+
     row.addEventListener('click', () => {
       const nodes = _getNodes?.() ?? []
       let targetId: string | null = null
@@ -182,7 +211,9 @@ async function loadAndRender(): Promise<void> {
   if (!_listEl) return
   _listEl.innerHTML = '<div style="padding:.75rem .5rem;color:#484f58;font-size:.8125rem">Loading…</div>'
   try {
-    _allEntries = await fetchAuditLog(_currentEntityId ? { entity_id: _currentEntityId } : undefined)
+    _allEntries = _currentEntityId
+      ? await fetchNodeAuditLog(_currentEntityId)
+      : await fetchAuditLog()
 
     if (_usernameSelect) {
       const prev = _usernameSelect.value

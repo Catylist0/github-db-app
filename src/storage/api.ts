@@ -76,3 +76,7 @@ export async function fetchAuditLog(params?: { username?: string; entity_id?: st
   const queryStr = qs.toString()
   return apiFetch(`/audit${queryStr ? `?${queryStr}` : ''}`) as Promise<AuditEntry[]>
 }
+
+export async function fetchNodeAuditLog(nodeId: string): Promise<AuditEntry[]> {
+  return apiFetch(`/nodes/${encodeURIComponent(nodeId)}/audit`) as Promise<AuditEntry[]>
+}
