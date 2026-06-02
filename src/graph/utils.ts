@@ -214,11 +214,16 @@ export function buildVanishMask(
 
     if (intervals.length === 0) continue
 
-    // Sort and merge overlapping intervals
+    // Sort and merge overlapping OR proximate intervals.
+    // Two intervals whose expanded fade zones would overlap must be merged into one,
+    // otherwise their gradient rects fight for the mask alpha and produce hard edges.
+    // The expansion on each side is (VANISH_BUFFER + VANISH_FADE), so the minimum
+    // gap between two intervals before their fade zones touch is twice that.
+    const MERGE_GAP_T = 2 * (VANISH_BUFFER + VANISH_FADE) / L
     intervals.sort((a, b) => a.tIn - b.tIn)
     const merged: Iv[] = []
     for (const iv of intervals) {
-      if (merged.length > 0 && iv.tIn <= merged[merged.length - 1].tOut) {
+      if (merged.length > 0 && iv.tIn <= merged[merged.length - 1].tOut + MERGE_GAP_T) {
         merged[merged.length - 1].tOut = Math.max(merged[merged.length - 1].tOut, iv.tOut)
       } else {
         merged.push({ ...iv })
