@@ -11,6 +11,7 @@ import {
   computeEdgeGeometry,
   buildVanishMask,
   cleanupVanishDefs,
+  segPathLength,
   type Seg,
 } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
@@ -77,6 +78,7 @@ export function addInteraction(
 
     // Precompute segments for every edge so edge-edge intersections work
     const segMap = new Map<string, Seg[]>()
+    const edgeById = new Map(graph.edges.map(e => [e.id, e]))
     for (const edge of graph.edges) {
       try {
         const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing)
@@ -101,11 +103,17 @@ export function addInteraction(
 
       cleanupVanishDefs(edge.id, defs)
 
-      const otherSegs = [...segMap.entries()]
+      const myLength = segPathLength(mySegs)
+      const otherEdges = [...segMap.entries()]
         .filter(([id]) => id !== edge.id)
-        .map(([, segs]) => segs)
+        .map(([id, segs]) => ({
+          id,
+          segs,
+          vanish: edgeById.get(id)?.vanish ?? false,
+          length: segPathLength(segs),
+        }))
 
-      const mask = buildVanishMask(edge.id, mySegs, edge.from, edge.to, graph.nodes, otherSegs, defs)
+      const mask = buildVanishMask(edge.id, mySegs, myLength, edge.from, edge.to, graph.nodes, otherEdges, defs)
       if (mask) {
         defs.appendChild(mask)
         path.setAttribute('mask', `url(#vm-${edge.id})`)

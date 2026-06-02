@@ -62,6 +62,16 @@ export function setPulse(rect: SVGRectElement, active: boolean): void {
 
 export type Seg = { x1: number; y1: number; x2: number; y2: number }
 
+export function segPathLength(segs: Seg[]): number {
+  return segs.reduce((sum, s) => {
+    const dx = s.x2 - s.x1
+    const dy = s.y2 - s.y1
+    return sum + Math.sqrt(dx * dx + dy * dy)
+  }, 0)
+}
+
+export type VanishOtherEdge = { id: string; segs: Seg[]; vanish: boolean; length: number }
+
 export interface EdgeGeometry {
   d: string
   midX: number
@@ -172,10 +182,11 @@ function segIntersectT(
 export function buildVanishMask(
   edgeId: string,
   mySegs: Seg[],
+  myLength: number,
   fromId: string,
   toId: string,
   allNodes: Node[],
-  otherEdgeSegs: Seg[][],
+  otherEdges: VanishOtherEdge[],
   defs: SVGDefsElement,
 ): SVGMaskElement | null {
   // Collect all [tIn, tOut] fade intervals per segment (in t coords 0..1 of segment)
@@ -201,14 +212,18 @@ export function buildVanishMask(
       if (hit) intervals.push(hit)
     }
 
-    // Edge-segment intersections — treat each crossing as a zero-width interval
-    for (const otherSeg of otherEdgeSegs) {
-      for (const os of otherSeg) {
+    // Edge-segment intersections — treat each crossing as a zero-width interval.
+    // When both edges vanish, only the longer edge fades at the crossing.
+    for (const other of otherEdges) {
+      for (const os of other.segs) {
         const t = segIntersectT(seg.x1, seg.y1, seg.x2, seg.y2, os.x1, os.y1, os.x2, os.y2)
-        if (t !== null) {
-          const hw = VANISH_BUFFER / L
-          intervals.push({ tIn: t - hw, tOut: t + hw })
+        if (t === null) continue
+        if (other.vanish) {
+          if (myLength < other.length) continue
+          if (myLength === other.length && edgeId > other.id) continue
         }
+        const hw = VANISH_BUFFER / L
+        intervals.push({ tIn: t - hw, tOut: t + hw })
       }
     }
 
