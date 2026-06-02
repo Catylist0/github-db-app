@@ -11,11 +11,11 @@ const SEED_NODES = [
 ]
 
 const SEED_EDGES = [
-  { id: '1-2', source: '1', target: '2' },
-  { id: '1-3', source: '1', target: '3' },
-  { id: '1-4', source: '1', target: '4' },
-  { id: '2-5', source: '2', target: '5' },
-  { id: '3-6', source: '3', target: '6' },
+  { id: '1-2', source: '1', target: '2', routing: 'straight', style: 'solid', vanish: 0 },
+  { id: '1-3', source: '1', target: '3', routing: 'straight', style: 'solid', vanish: 0 },
+  { id: '1-4', source: '1', target: '4', routing: 'straight', style: 'solid', vanish: 0 },
+  { id: '2-5', source: '2', target: '5', routing: 'straight', style: 'solid', vanish: 0 },
+  { id: '3-6', source: '3', target: '6', routing: 'straight', style: 'solid', vanish: 0 },
 ]
 
 function cors(origin) {
@@ -70,12 +70,11 @@ async function initSchema(db) {
       diff TEXT NOT NULL
     )`),
   ])
-  try {
-    await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run()
-  } catch { /* column already exists */ }
-  try {
-    await db.prepare("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'planned'").run()
-  } catch { /* column already exists */ }
+  try { await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run() } catch { /* exists */ }
+  try { await db.prepare("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'planned'").run() } catch { /* exists */ }
+  try { await db.prepare("ALTER TABLE edges ADD COLUMN routing TEXT NOT NULL DEFAULT 'straight'").run() } catch { /* exists */ }
+  try { await db.prepare("ALTER TABLE edges ADD COLUMN style TEXT NOT NULL DEFAULT 'solid'").run() } catch { /* exists */ }
+  try { await db.prepare('ALTER TABLE edges ADD COLUMN vanish INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
 }
 
 async function runBackup(env) {
@@ -84,17 +83,10 @@ async function runBackup(env) {
     env.DB.prepare('SELECT * FROM edges'),
   ])
   const timestamp = new Date().toISOString()
-  const backup = JSON.stringify({
-    timestamp,
-    nodes: nr.results,
-    edges: er.results,
-  })
-
+  const backup = JSON.stringify({ timestamp, nodes: nr.results, edges: er.results })
   await env.BACKUPS.put(`backups/${timestamp}.json`, backup, {
     httpMetadata: { contentType: 'application/json' },
   })
-
-  // Delete backups older than 2 days
   const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000
   const list = await env.BACKUPS.list({ prefix: 'backups/' })
   for (const obj of list.objects) {
@@ -113,11 +105,9 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders })
     }
 
-    // OAuth callback — no auth required
     if (url.pathname === '/callback' && request.method === 'GET') {
       const code = url.searchParams.get('code')
       if (!code) return new Response('Missing code', { status: 400 })
-
       const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -125,7 +115,6 @@ export default {
       })
       const { access_token } = await tokenRes.json()
       if (!access_token) return new Response('OAuth failed', { status: 400 })
-
       const redirect = new URL('https://catylist0.github.io/github-db-app/')
       redirect.hash = `token=${access_token}`
       return Response.redirect(redirect.toString(), 302)
@@ -146,8 +135,8 @@ export default {
               .bind(n.id, n.label, n.x, n.y, n.description, n.status)
           ),
           ...SEED_EDGES.map(e =>
-            env.DB.prepare('INSERT OR IGNORE INTO edges (id,source,target) VALUES (?,?,?)')
-              .bind(e.id, e.source, e.target)
+            env.DB.prepare('INSERT OR IGNORE INTO edges (id,source,target,routing,style,vanish) VALUES (?,?,?,?,?,?)')
+              .bind(e.id, e.source, e.target, e.routing, e.style, e.vanish)
           ),
         ])
         return json({ nodes: SEED_NODES, edges: SEED_EDGES }, 200, corsHeaders)
@@ -166,20 +155,18 @@ export default {
     const path = url.pathname
     const segments = path.split('/').filter(Boolean)
 
-    // GET /backups — list available backups
+    // GET /backups
     if (request.method === 'GET' && path === '/backups') {
       const list = await env.BACKUPS.list({ prefix: 'backups/' })
-      const keys = list.objects.map(o => ({ key: o.key, uploaded: o.uploaded }))
-      return json(keys, 200, corsHeaders)
+      return json(list.objects.map(o => ({ key: o.key, uploaded: o.uploaded })), 200, corsHeaders)
     }
 
-    // GET /backups/:timestamp — fetch a specific backup
+    // GET /backups/:timestamp
     if (request.method === 'GET' && segments[0] === 'backups' && segments[1]) {
       const key = `backups/${decodeURIComponent(segments[1])}.json`
       const obj = await env.BACKUPS.get(key)
       if (!obj) return json({ error: 'Not found' }, 404, corsHeaders)
-      const data = await obj.json()
-      return json(data, 200, corsHeaders)
+      return json(await obj.json(), 200, corsHeaders)
     }
 
     // GET /audit
@@ -240,27 +227,42 @@ export default {
         env.DB.prepare('DELETE FROM nodes WHERE id=?').bind(id),
       ])
       const now = new Date().toISOString()
-      const auditStmts = [
+      await env.DB.batch([
         ...cascadedEdges.map(edge =>
           env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
             .bind(crypto.randomUUID(), now, auth.username, 'delete_edge', 'edge', edge.id, JSON.stringify({ before: edge, after: null }))
         ),
         env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
           .bind(crypto.randomUUID(), now, auth.username, 'delete_node', 'node', id, JSON.stringify({ before, after: null })),
-      ]
-      await env.DB.batch(auditStmts)
+      ])
       return json({ ok: true }, 200, corsHeaders)
     }
 
     // POST /edges
     if (request.method === 'POST' && path === '/edges') {
-      const { id, source, target } = await request.json()
-      await env.DB.prepare('INSERT OR IGNORE INTO edges (id,source,target) VALUES (?,?,?)')
-        .bind(id, source, target).run()
-      const after = { id, source, target }
+      const { id, source, target, routing, style, vanish } = await request.json()
+      const r = routing ?? 'straight', s = style ?? 'solid', v = vanish ? 1 : 0
+      await env.DB.prepare('INSERT OR IGNORE INTO edges (id,source,target,routing,style,vanish) VALUES (?,?,?,?,?,?)')
+        .bind(id, source, target, r, s, v).run()
+      const after = { id, source, target, routing: r, style: s, vanish: v }
       await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
         .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_edge', 'edge', id, JSON.stringify({ before: null, after })).run()
       return json({ ok: true }, 201, corsHeaders)
+    }
+
+    // PATCH /edges/:id
+    if (request.method === 'PATCH' && segments[0] === 'edges' && segments[1]) {
+      const id = decodeURIComponent(segments[1])
+      const before = (await env.DB.prepare('SELECT * FROM edges WHERE id=?').bind(id).first()) ?? null
+      const { routing, style, vanish } = await request.json()
+      const r = routing ?? before?.routing ?? 'straight'
+      const s = style ?? before?.style ?? 'solid'
+      const v = vanish !== undefined ? (vanish ? 1 : 0) : (before?.vanish ?? 0)
+      await env.DB.prepare('UPDATE edges SET routing=?, style=?, vanish=? WHERE id=?').bind(r, s, v, id).run()
+      const after = (await env.DB.prepare('SELECT * FROM edges WHERE id=?').bind(id).first()) ?? null
+      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'update_edge', 'edge', id, JSON.stringify({ before, after })).run()
+      return json({ ok: true }, 200, corsHeaders)
     }
 
     // DELETE /edges/:id

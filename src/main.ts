@@ -1,5 +1,5 @@
 import { storeToken, getToken, login, logout, isAuthenticated } from './auth/github'
-import { loadGraph, upsertNode, deleteNode, upsertEdge, deleteEdge, onUnauthorized } from './storage/api'
+import { loadGraph, upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge, onUnauthorized } from './storage/api'
 import { renderGraph } from './graph/renderer'
 import { hidePanel } from './ui/panel'
 import { hideSearchPanel, toggleSearchPanel, isSearchPanelOpen } from './ui/search'
@@ -224,7 +224,7 @@ async function init(): Promise<void> {
     const graph = await loadGraph()
     _graph = graph
     app.style.cssText = ''
-    _controls = renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge }, {
+    _controls = renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge }, {
       onFocusNode: (nodeId) => {
         _selectedNodeId = nodeId
         updateAuditPanelSelection(nodeId)

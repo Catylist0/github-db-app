@@ -1,4 +1,6 @@
 export type NodeStatus = 'planned' | 'ongoing' | 'complete'
+export type EdgeRouting = 'straight' | 'elbow1' | 'elbow2'
+export type EdgeStyle = 'solid' | 'dashed'
 
 export interface Node {
   id: string
@@ -13,6 +15,9 @@ export interface Edge {
   id: string
   from: string
   to: string
+  routing: EdgeRouting
+  style: EdgeStyle
+  vanish: boolean
 }
 
 export interface Graph {
@@ -25,6 +30,7 @@ export interface GraphAPI {
   deleteNode: (id: string) => Promise<void>
   upsertEdge: (edge: Edge) => Promise<void>
   deleteEdge: (id: string) => Promise<void>
+  patchEdge: (id: string, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>) => Promise<void>
 }
 
 export interface AuditEntry {

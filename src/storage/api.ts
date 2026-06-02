@@ -1,6 +1,6 @@
 import { getToken } from '../auth/github'
 import { WORKER_URL } from '../config'
-import type { Graph, Node, Edge, AuditEntry } from '../types'
+import type { Graph, Node, Edge, EdgeRouting, EdgeStyle, AuditEntry } from '../types'
 
 let _onUnauthorized: ((reason: string) => void) | null = null
 export function onUnauthorized(fn: (reason: string) => void): void {
@@ -39,11 +39,18 @@ export async function loadGraph(): Promise<Graph> {
   }
   const data = await res.json() as {
     nodes: Node[]
-    edges: Array<{ id: string; source: string; target: string }>
+    edges: Array<{ id: string; source: string; target: string; routing?: string; style?: string; vanish?: number }>
   }
   return {
     nodes: data.nodes,
-    edges: data.edges.map(e => ({ id: e.id, from: e.source, to: e.target })),
+    edges: data.edges.map(e => ({
+      id: e.id,
+      from: e.source,
+      to: e.target,
+      routing: (e.routing ?? 'straight') as EdgeRouting,
+      style: (e.style ?? 'solid') as EdgeStyle,
+      vanish: Boolean(e.vanish),
+    })),
   }
 }
 
@@ -61,7 +68,14 @@ export async function deleteNode(id: string): Promise<void> {
 export async function upsertEdge(edge: Edge): Promise<void> {
   await apiFetch('/edges', {
     method: 'POST',
-    body: JSON.stringify({ id: edge.id, source: edge.from, target: edge.to }),
+    body: JSON.stringify({ id: edge.id, source: edge.from, target: edge.to, routing: edge.routing, style: edge.style, vanish: edge.vanish }),
+  })
+}
+
+export async function patchEdge(id: string, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>): Promise<void> {
+  await apiFetch(`/edges/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
   })
 }
 

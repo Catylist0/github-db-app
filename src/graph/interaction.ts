@@ -1,4 +1,4 @@
-import type { Graph, GraphAPI, Node, Edge } from '../types'
+import type { Graph, GraphAPI, Node, Edge, EdgeRouting, EdgeStyle } from '../types'
 import {
   svgEl,
   edgeEndpoint,
@@ -9,9 +9,12 @@ import {
   setPulse,
   NODE_STROKE_WIDTH,
   SELECTED_NODE_STROKE_WIDTH,
+  computeEdgeGeometry,
+  buildVanishGradient,
 } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
 import { record, popUndo, pushRedo, popRedo, pushUndo, clearHistory } from '../history/stack'
+import { openEdgeDialog, closeEdgeDialog, isEdgeDialogOpen } from '../ui/edge-dialog'
 import type { HistoryEntry } from '../history/stack'
 
 const DRAG_THRESHOLD = 4
@@ -30,6 +33,7 @@ export function addInteraction(
 
   function applyTransform(): void {
     viewport.setAttribute('transform', `translate(${state.tx},${state.ty}) scale(${state.scale})`)
+    positionIconClusters()
   }
 
   function clientToViewport(cx: number, cy: number): { x: number; y: number } {
@@ -38,6 +42,11 @@ export function addInteraction(
       x: (cx - r.left - state.tx) / state.scale,
       y: (cy - r.top - state.ty) / state.scale,
     }
+  }
+
+  function vpToScreen(vpX: number, vpY: number): { x: number; y: number } {
+    const r = svg.getBoundingClientRect()
+    return { x: r.left + state.tx + vpX * state.scale, y: r.top + state.ty + vpY * state.scale }
   }
 
   // ── Auth state ─────────────────────────────────────────────────────────────
@@ -52,6 +61,177 @@ export function addInteraction(
     if (_focusedNodeId === nodeId) return
     _focusedNodeId = nodeId
     options?.onFocusNode?.(nodeId)
+  }
+
+  // ── Edge clipboard ─────────────────────────────────────────────────────────
+
+  let edgeClipboard: { routing: EdgeRouting; style: EdgeStyle; vanish: boolean } | null = null
+
+  // ── Icon clusters ──────────────────────────────────────────────────────────
+
+  interface IconCluster { edgeId: string; el: SVGGElement; midVpX: number; midVpY: number }
+  let iconClusters: IconCluster[] = []
+
+  function clearIconClusters(): void {
+    for (const c of iconClusters) c.el.remove()
+    iconClusters = []
+  }
+
+  function positionIconClusters(): void {
+    for (const c of iconClusters) {
+      c.el.setAttribute('transform', `translate(${state.tx + c.midVpX * state.scale},${state.ty + c.midVpY * state.scale})`)
+    }
+  }
+
+  function svgIconBtn(icon: string, hoverColor: string, onClick: (e: MouseEvent) => void): SVGGElement {
+    const g = svgEl('g')
+    g.style.cursor = 'pointer'
+
+    const circle = svgEl('circle')
+    circle.setAttribute('r', '9')
+    circle.setAttribute('fill', '#161b22')
+    circle.setAttribute('stroke', '#30363d')
+    circle.setAttribute('stroke-width', '1')
+
+    const text = svgEl('text')
+    text.setAttribute('text-anchor', 'middle')
+    text.setAttribute('dominant-baseline', 'middle')
+    text.setAttribute('fill', '#8b949e')
+    text.setAttribute('font-size', '10')
+    text.setAttribute('pointer-events', 'none')
+    text.style.userSelect = 'none'
+    text.textContent = icon
+
+    g.appendChild(circle)
+    g.appendChild(text)
+    g.addEventListener('mouseenter', () => {
+      circle.setAttribute('fill', '#21262d')
+      circle.setAttribute('stroke', hoverColor)
+      text.setAttribute('fill', '#e6edf3')
+    })
+    g.addEventListener('mouseleave', () => {
+      circle.setAttribute('fill', '#161b22')
+      circle.setAttribute('stroke', '#30363d')
+      text.setAttribute('fill', '#8b949e')
+    })
+    g.addEventListener('mousedown', e => e.stopPropagation())
+    g.addEventListener('click', onClick)
+    return g
+  }
+
+  function applyEdgePatch(edge: Edge, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>): void {
+    Object.assign(edge, patch)
+    const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
+    if (!path) return
+    const defs = svg.querySelector<SVGDefsElement>('defs')
+    const fromPos = getNodePos(edge.from)
+    const toPos = getNodePos(edge.to)
+    const geo = computeEdgeGeometry(fromPos, toPos, edge.routing)
+    path.setAttribute('d', geo.d)
+    path.dataset.midX = String(geo.midX)
+    path.dataset.midY = String(geo.midY)
+    path.setAttribute('stroke-dasharray', edge.style === 'dashed' ? '6 4' : '')
+
+    if (defs) {
+      const gradId = `vg-${edge.id}`
+      defs.querySelector(`#${gradId}`)?.remove()
+      if (edge.vanish && edge.routing === 'straight') {
+        const start = edgeEndpoint(toPos.x, toPos.y, fromPos.x, fromPos.y)
+        const end = edgeEndpoint(fromPos.x, fromPos.y, toPos.x, toPos.y)
+        const grad = buildVanishGradient(edge.id, start.x, start.y, end.x, end.y, edge.from, edge.to, graph.nodes, '#444')
+        if (grad) {
+          defs.appendChild(grad)
+          path.setAttribute('stroke', `url(#${gradId})`)
+        } else {
+          path.setAttribute('stroke', '#444')
+        }
+      } else {
+        path.setAttribute('stroke', '#444')
+      }
+    }
+
+    api.patchEdge(edge.id, patch).catch(console.error)
+  }
+
+  function buildIconCluster(edge: Edge): SVGGElement {
+    const g = svgEl('g')
+    const items: Array<{ icon: string; color: string; fn: (e: MouseEvent) => void }> = []
+
+    if (edgeClipboard) {
+      items.push({ icon: '⏙', color: '#22c55e', fn: (e) => {
+        e.stopPropagation()
+        if (!edgeClipboard) return
+        applyEdgePatch(edge, { ...edgeClipboard })
+        updateIconClusters()
+      }})
+    }
+    items.push({ icon: '⎘', color: '#58a6ff', fn: (e) => {
+      e.stopPropagation()
+      edgeClipboard = { routing: edge.routing, style: edge.style, vanish: edge.vanish }
+      updateIconClusters()
+    }})
+    items.push({ icon: '⚙', color: '#f97316', fn: (e) => {
+      e.stopPropagation()
+      const sc = vpToScreen(Number(g.dataset.midVpX ?? 0), Number(g.dataset.midVpY ?? 0))
+      clearIconClusters()
+      openEdgeDialog(
+        edge,
+        sc.x, sc.y,
+        edgeClipboard,
+        (patch) => {
+          applyEdgePatch(edge, patch)
+          updateIconClusters()
+        },
+        () => {
+          edgeClipboard = { routing: edge.routing, style: edge.style, vanish: edge.vanish }
+          updateIconClusters()
+        },
+        () => {
+          if (!edgeClipboard) return
+          applyEdgePatch(edge, { ...edgeClipboard })
+          updateIconClusters()
+        },
+      )
+    }})
+
+    const spacing = 20
+    const totalW = (items.length - 1) * spacing
+    const offsetX = -totalW / 2
+
+    for (let i = 0; i < items.length; i++) {
+      const btn = svgIconBtn(items[i].icon, items[i].color, items[i].fn)
+      btn.setAttribute('transform', `translate(${offsetX + i * spacing},0)`)
+      g.appendChild(btn)
+    }
+
+    return g
+  }
+
+  function updateIconClusters(): void {
+    clearIconClusters()
+    if (!authenticated || selectedNodes.size === 0) return
+    if (isEdgeDialogOpen()) return
+
+    for (const path of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
+      const fromId = path.dataset.from!
+      const toId = path.dataset.to!
+      if (!selectedNodes.has(fromId) && !selectedNodes.has(toId)) continue
+
+      const edgeId = path.dataset.edgeId!
+      const edge = graph.edges.find(e => e.id === edgeId)
+      if (!edge) continue
+
+      const midVpX = Number(path.dataset.midX)
+      const midVpY = Number(path.dataset.midY)
+
+      const g = buildIconCluster(edge)
+      g.dataset.midVpX = String(midVpX)
+      g.dataset.midVpY = String(midVpY)
+      svg.appendChild(g)
+      iconClusters.push({ edgeId, el: g, midVpX, midVpY })
+    }
+
+    positionIconClusters()
   }
 
   // ── Selection ──────────────────────────────────────────────────────────────
@@ -121,11 +301,29 @@ export function addInteraction(
     }
 
     const hasSelection = selectedNodes.size > 0
+    const defs = svg.querySelector<SVGDefsElement>('defs')
     for (const path of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
       const hl = hasSelection && (selectedNodes.has(path.dataset.from!) || selectedNodes.has(path.dataset.to!))
-      path.setAttribute('stroke', hl ? '#e6edf3' : '#444')
+      const color = hl ? '#e6edf3' : '#444'
       path.setAttribute('marker-end', hl ? 'url(#arrowhead-hl)' : 'url(#arrowhead)')
+
+      const edgeId = path.dataset.edgeId
+      const edge = edgeId ? graph.edges.find(e => e.id === edgeId) : null
+      if (edge?.vanish && defs) {
+        const grad = defs.querySelector<SVGLinearGradientElement>(`#vg-${edgeId}`)
+        if (grad) {
+          for (const stop of grad.querySelectorAll<SVGStopElement>('stop')) {
+            stop.setAttribute('stop-color', color)
+          }
+        } else {
+          path.setAttribute('stroke', color)
+        }
+      } else {
+        path.setAttribute('stroke', color)
+      }
     }
+
+    if (authenticated) updateIconClusters()
   }
 
   function selectNode(id: string): void {
@@ -148,9 +346,13 @@ export function addInteraction(
   function refreshEdgePath(path: SVGPathElement): void {
     const from = getNodePos(path.dataset.from!)
     const to = getNodePos(path.dataset.to!)
-    const start = edgeEndpoint(to.x, to.y, from.x, from.y)
-    const end = edgeEndpoint(from.x, from.y, to.x, to.y)
-    path.setAttribute('d', `M ${start.x} ${start.y} L ${end.x} ${end.y}`)
+    const edgeId = path.dataset.edgeId
+    const edge = edgeId ? graph.edges.find(e => e.id === edgeId) : undefined
+    const routing = edge?.routing ?? 'straight'
+    const geo = computeEdgeGeometry(from, to, routing)
+    path.setAttribute('d', geo.d)
+    path.dataset.midX = String(geo.midX)
+    path.dataset.midY = String(geo.midY)
   }
 
   function updateEdgesForNode(nodeId: string): void {
@@ -161,7 +363,7 @@ export function addInteraction(
     }
   }
 
-  // ── Internal graph/DOM mutations (no history recording) ────────────────────
+  // ── Internal graph/DOM mutations ───────────────────────────────────────────
 
   function internalAddNode(node: Node): void {
     if (graph.nodes.some(n => n.id === node.id)) return
@@ -178,7 +380,11 @@ export function addInteraction(
     if (idx >= 0) graph.nodes.splice(idx, 1)
     graph.edges = graph.edges.filter(e => e.from !== id && e.to !== id)
     viewport.querySelector(`[data-node-id="${id}"]`)?.remove()
-    viewport.querySelectorAll<SVGPathElement>(`[data-from="${id}"],[data-to="${id}"]`).forEach(p => p.remove())
+    viewport.querySelectorAll<SVGPathElement>(`[data-from="${id}"],[data-to="${id}"]`).forEach(p => {
+      const eid = p.dataset.edgeId
+      if (eid) svg.querySelector<SVGLinearGradientElement>(`#vg-${eid}`)?.remove()
+      p.remove()
+    })
     api.deleteNode(id).catch(console.error)
   }
 
@@ -188,7 +394,8 @@ export function addInteraction(
     const toEl = viewport.querySelector(`[data-node-id="${edge.to}"]`)
     if (!fromEl || !toEl) return
     graph.edges.push(edge)
-    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to)
+    const defs = svg.querySelector<SVGDefsElement>('defs') ?? undefined
+    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge, graph.nodes, defs)
     viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
     api.upsertEdge(edge).catch(console.error)
   }
@@ -197,6 +404,7 @@ export function addInteraction(
     const idx = graph.edges.findIndex(e => e.id === edgeId)
     if (idx < 0) return
     const [edge] = graph.edges.splice(idx, 1)
+    svg.querySelector(`#vg-${edgeId}`)?.remove()
     viewport.querySelector(`[data-from="${edge.from}"][data-to="${edge.to}"]`)?.remove()
     api.deleteEdge(edge.id).catch(console.error)
   }
@@ -237,13 +445,15 @@ export function addInteraction(
     const existingIdx = graph.edges.findIndex(e => e.from === fromId && e.to === toId)
     if (existingIdx >= 0) {
       const [removed] = graph.edges.splice(existingIdx, 1)
+      svg.querySelector(`#vg-${removed.id}`)?.remove()
       viewport.querySelector(`[data-from="${fromId}"][data-to="${toId}"]`)?.remove()
       api.deleteEdge(removed.id).catch(console.error)
       record({ type: 'delete-edge', edge: { ...removed } })
     } else {
-      const edge: Edge = { id: `${fromId}-${toId}`, from: fromId, to: toId }
+      const edge: Edge = { id: `${fromId}-${toId}`, from: fromId, to: toId, routing: 'straight', style: 'solid', vanish: false }
       graph.edges.push(edge)
-      const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId)
+      const defs = svg.querySelector<SVGDefsElement>('defs') ?? undefined
+      const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId, edge, graph.nodes, defs)
       viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
       api.upsertEdge(edge).catch(console.error)
       record({ type: 'create-edge', edge: { ...edge } })
@@ -268,6 +478,7 @@ export function addInteraction(
   function openPanel(node: Node, autoFocusName = false): void {
     const id = node.id
     setFocusedNode(id)
+    closeEdgeDialog()
     const isReadonly = !authenticated
     showPanel(
       node,
@@ -346,7 +557,7 @@ export function addInteraction(
     record({ type: 'create-node', node: { ...node } })
 
     if (fromId) {
-      const edge: Edge = { id: `${fromId}-${node.id}`, from: fromId, to: node.id }
+      const edge: Edge = { id: `${fromId}-${node.id}`, from: fromId, to: node.id, routing: 'straight', style: 'solid', vanish: false }
       internalAddEdge(edge)
       record({ type: 'create-edge', edge: { ...edge } })
       refreshHighlights()
@@ -428,6 +639,8 @@ export function addInteraction(
       setAddMode(false)
       clearHistory()
       setFocusedNode(null)
+      clearIconClusters()
+      closeEdgeDialog()
     }
     hidePanel()
   }
@@ -442,9 +655,7 @@ export function addInteraction(
     const targetTx = svgRect.width / 2 - nodeCx * targetScale
     const targetTy = svgRect.height / 2 - nodeCy * targetScale
 
-    const startTx = state.tx
-    const startTy = state.ty
-    const startScale = state.scale
+    const startTx = state.tx, startTy = state.ty, startScale = state.scale
     const animStart = performance.now()
 
     function step(now: number): void {
@@ -458,7 +669,6 @@ export function addInteraction(
     }
     requestAnimationFrame(step)
 
-    // Briefly pulse border to #388bfd to draw the eye
     const rectEl = nodeRect(g)
     rectEl.setAttribute('stroke', '#388bfd')
     rectEl.setAttribute('stroke-width', '2.5')
@@ -554,7 +764,7 @@ export function addInteraction(
       const dx = e.clientX - dragClientStart.x
       const dy = e.clientY - dragClientStart.y
       if (!hasDragged && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
-        if (!authenticated) return // no drag in read-only; click will still register on mouseup
+        if (!authenticated) return
         hasDragged = true
         activeNode.style.cursor = 'grabbing'
       }
@@ -617,7 +827,6 @@ export function addInteraction(
         }
         if (moveRecords.length > 0) record({ type: 'move-nodes', moves: moveRecords })
       } else {
-        // Click: open panel (read-only or edit depending on auth)
         const nodeId = activeNode.dataset.nodeId!
         if (authenticated && e.ctrlKey) {
           if (selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {

@@ -15,8 +15,8 @@ export function renderGraph(
   svg.setAttribute('height', '100%')
   svg.style.display = 'block'
 
-  // Arrowhead marker
   const defs = svgEl('defs')
+
   const marker = svgEl('marker')
   marker.id = 'arrowhead'
   marker.setAttribute('markerWidth', '10')
@@ -48,15 +48,13 @@ export function renderGraph(
   viewport.id = 'viewport'
   svg.appendChild(viewport)
 
-  // Edges — drawn first so they sit behind nodes
   const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
   for (const edge of graph.edges) {
     const from = nodeMap.get(edge.from)!
     const to = nodeMap.get(edge.to)!
-    viewport.appendChild(makeEdgePath(from, to, edge.from, edge.to))
+    viewport.appendChild(makeEdgePath(from, to, edge.from, edge.to, edge, graph.nodes, defs))
   }
 
-  // Nodes
   for (const node of graph.nodes) {
     viewport.appendChild(makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)))
   }

@@ -40,6 +40,7 @@ function actionLabel(action: string): string {
     case 'update_node': return 'updated node'
     case 'delete_node': return 'deleted node'
     case 'create_edge': return 'created edge'
+    case 'update_edge': return 'updated edge'
     case 'delete_edge': return 'deleted edge'
     default: return action
   }
@@ -78,6 +79,19 @@ function getEntityName(entry: AuditEntry): string {
 }
 
 function getUpdateDetail(entry: AuditEntry): string {
+  if (entry.action === 'update_edge') {
+    try {
+      const diff = JSON.parse(entry.diff) as { before: DiffRow; after: DiffRow }
+      const before = diff.before, after = diff.after
+      if (!before || !after) return ''
+      const parts: string[] = []
+      if (before['routing'] !== after['routing']) parts.push(`routing → ${after['routing']}`)
+      if (before['style'] !== after['style']) parts.push(`style → ${after['style']}`)
+      if (Boolean(before['vanish']) !== Boolean(after['vanish']))
+        parts.push(after['vanish'] ? 'vanish on' : 'vanish off')
+      return parts.join(' · ')
+    } catch { return '' }
+  }
   if (entry.action !== 'update_node') return ''
   try {
     const diff = JSON.parse(entry.diff) as { before: DiffRow; after: DiffRow }
