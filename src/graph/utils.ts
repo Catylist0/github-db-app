@@ -256,13 +256,19 @@ export function buildVanishMask(
   const mask = svgEl('mask')
   mask.id = `vm-${edgeId}`
   mask.setAttribute('maskUnits', 'userSpaceOnUse')
+  // Explicit bounds in graph-coordinate space — prevents the browser from applying
+  // the default (-10%…+120% of SVG viewport) which clips the mask at a visible line.
+  mask.setAttribute('x', '-10000')
+  mask.setAttribute('y', '-10000')
+  mask.setAttribute('width', '30000')
+  mask.setAttribute('height', '30000')
 
   // White background: show entire path
   const bg = svgEl('rect')
-  bg.setAttribute('x', '-99999')
-  bg.setAttribute('y', '-99999')
-  bg.setAttribute('width', '999999')
-  bg.setAttribute('height', '999999')
+  bg.setAttribute('x', '-10000')
+  bg.setAttribute('y', '-10000')
+  bg.setAttribute('width', '30000')
+  bg.setAttribute('height', '30000')
   bg.setAttribute('fill', 'white')
   mask.appendChild(bg)
 
@@ -272,11 +278,13 @@ export function buildVanishMask(
 
     const grad = svgEl('linearGradient')
     grad.id = gradId
-    // objectBoundingBox: gradient goes along the rect's width axis regardless of rotation
-    grad.setAttribute('gradientUnits', 'objectBoundingBox')
+    // userSpaceOnUse in the rect's own local coordinate system (x: 0→totalLen, y: 0→2*HALF_H).
+    // Keeping the gradient in all-positive local coords avoids browser bugs with
+    // objectBoundingBox when the bounding box straddles y=0.
+    grad.setAttribute('gradientUnits', 'userSpaceOnUse')
     grad.setAttribute('x1', '0')
     grad.setAttribute('y1', '0')
-    grad.setAttribute('x2', '1')
+    grad.setAttribute('x2', String(r.totalLen))
     grad.setAttribute('y2', '0')
 
     const addStop = (offset: number, color: string): void => {
@@ -294,15 +302,17 @@ export function buildVanishMask(
     defs.appendChild(grad)
 
     const angle = Math.atan2(r.endY - r.startY, r.endX - r.startX) * 180 / Math.PI
-    const HALF_H = 60  // wide enough to cover the stroke plus some margin
+    const HALF_H = 60
 
+    // Rect sits entirely in positive local y (0 to 2*HALF_H). The extra
+    // translate(0,-HALF_H) centres it on the edge after the rotation.
     const rect = svgEl('rect')
     rect.setAttribute('x', '0')
-    rect.setAttribute('y', String(-HALF_H))
+    rect.setAttribute('y', '0')
     rect.setAttribute('width', String(r.totalLen))
     rect.setAttribute('height', String(HALF_H * 2))
     rect.setAttribute('fill', `url(#${gradId})`)
-    rect.setAttribute('transform', `translate(${r.startX},${r.startY}) rotate(${angle})`)
+    rect.setAttribute('transform', `translate(${r.startX},${r.startY}) rotate(${angle}) translate(0,${-HALF_H})`)
     mask.appendChild(rect)
   })
 
