@@ -1,6 +1,6 @@
 import { getToken } from '../auth/github'
 import { WORKER_URL } from '../config'
-import type { Graph, Node, Edge, EdgeRouting, EdgeStyle, AuditEntry } from '../types'
+import type { Graph, Node, Edge, EdgeRouting, EdgeStyle, AuditPage } from '../types'
 
 let _onUnauthorized: ((reason: string) => void) | null = null
 export function onUnauthorized(fn: (reason: string) => void): void {
@@ -83,14 +83,28 @@ export async function deleteEdge(id: string): Promise<void> {
   await apiFetch(`/edges/${id}`, { method: 'DELETE' })
 }
 
-export async function fetchAuditLog(params?: { username?: string; entity_id?: string }): Promise<AuditEntry[]> {
+export const AUDIT_PAGE_SIZE = 25
+
+export async function fetchAuditLog(params?: {
+  username?: string
+  entity_id?: string
+  limit?: number
+  offset?: number
+}): Promise<AuditPage> {
   const qs = new URLSearchParams()
   if (params?.username) qs.set('username', params.username)
   if (params?.entity_id) qs.set('entity_id', params.entity_id)
-  const queryStr = qs.toString()
-  return apiFetch(`/audit${queryStr ? `?${queryStr}` : ''}`) as Promise<AuditEntry[]>
+  qs.set('limit', String(params?.limit ?? AUDIT_PAGE_SIZE))
+  qs.set('offset', String(params?.offset ?? 0))
+  return apiFetch(`/audit?${qs}`) as Promise<AuditPage>
 }
 
-export async function fetchNodeAuditLog(nodeId: string): Promise<AuditEntry[]> {
-  return apiFetch(`/nodes/${encodeURIComponent(nodeId)}/audit`) as Promise<AuditEntry[]>
+export async function fetchNodeAuditLog(
+  nodeId: string,
+  params?: { limit?: number; offset?: number },
+): Promise<AuditPage> {
+  const qs = new URLSearchParams()
+  qs.set('limit', String(params?.limit ?? AUDIT_PAGE_SIZE))
+  qs.set('offset', String(params?.offset ?? 0))
+  return apiFetch(`/nodes/${encodeURIComponent(nodeId)}/audit?${qs}`) as Promise<AuditPage>
 }

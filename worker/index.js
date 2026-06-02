@@ -10,6 +10,9 @@ const SEED_NODES = [
   { id: '6', label: 'Components',    x: 400, y:  50, description: null, status: 'planned' },
 ]
 
+const AUDIT_RETENTION_MS = 12 * 60 * 60 * 1000
+const AUDIT_PAGE_SIZE = 25
+
 const SEED_EDGES = [
   { id: '1-2', source: '1', target: '2', routing: 'straight', style: 'solid', vanish: 0 },
   { id: '1-3', source: '1', target: '3', routing: 'straight', style: 'solid', vanish: 0 },
@@ -77,13 +80,58 @@ async function initSchema(db) {
   try { await db.prepare('ALTER TABLE edges ADD COLUMN vanish INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
 }
 
+function auditRetentionCutoff() {
+  return new Date(Date.now() - AUDIT_RETENTION_MS).toISOString()
+}
+
+async function pruneAuditLog(db) {
+  await db.prepare('DELETE FROM audit_log WHERE timestamp < ?').bind(auditRetentionCutoff()).run()
+}
+
+function parseAuditPagination(url) {
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') ?? String(AUDIT_PAGE_SIZE), 10) || AUDIT_PAGE_SIZE))
+  const offset = Math.max(0, parseInt(url.searchParams.get('offset') ?? '0', 10) || 0)
+  return { limit, offset }
+}
+
+async function queryAuditPage(db, url, extraConditions = [], extraParams = []) {
+  await pruneAuditLog(db)
+  const { limit, offset } = parseAuditPagination(url)
+  const conditions = [...extraConditions]
+  const params = [...extraParams]
+  const usernameFilter = url.searchParams.get('username')
+  const entityIdFilter = url.searchParams.get('entity_id')
+  if (usernameFilter) {
+    conditions.push('username=?')
+    params.push(usernameFilter)
+  }
+  if (entityIdFilter) {
+    conditions.push('entity_id=?')
+    params.push(entityIdFilter)
+  }
+  let query = 'SELECT * FROM audit_log'
+  if (conditions.length) query += ' WHERE ' + conditions.join(' AND ')
+  query += ' ORDER BY timestamp DESC LIMIT ? OFFSET ?'
+  const result = await db.prepare(query).bind(...params, limit + 1, offset).all()
+  const rows = result.results
+  const hasMore = rows.length > limit
+  const entries = hasMore ? rows.slice(0, limit) : rows
+  return { entries, hasMore }
+}
+
 async function runBackup(env) {
-  const [nr, er] = await env.DB.batch([
+  const [nr, er, ar] = await env.DB.batch([
     env.DB.prepare('SELECT * FROM nodes'),
     env.DB.prepare('SELECT * FROM edges'),
+    env.DB.prepare('SELECT * FROM audit_log ORDER BY timestamp DESC'),
   ])
   const timestamp = new Date().toISOString()
-  const backup = JSON.stringify({ timestamp, nodes: nr.results, edges: er.results })
+  const backup = JSON.stringify({
+    timestamp,
+    nodes: nr.results,
+    edges: er.results,
+    audit_log: ar.results,
+  })
   await env.BACKUPS.put(`backups/${timestamp}.json`, backup, {
     httpMetadata: { contentType: 'application/json' },
   })
@@ -93,6 +141,7 @@ async function runBackup(env) {
     const ts = new Date(obj.key.replace('backups/', '').replace('.json', '')).getTime()
     if (ts < cutoff) await env.BACKUPS.delete(obj.key)
   }
+  await pruneAuditLog(env.DB)
 }
 
 export default {
@@ -169,28 +218,17 @@ export default {
       return json(await obj.json(), 200, corsHeaders)
     }
 
-    // GET /audit
+    // GET /audit?limit=&offset=&username=&entity_id=
     if (request.method === 'GET' && path === '/audit') {
-      let query = 'SELECT * FROM audit_log'
-      const conditions = []
-      const params = []
-      const usernameFilter = url.searchParams.get('username')
-      const entityIdFilter = url.searchParams.get('entity_id')
-      if (usernameFilter) { conditions.push('username=?'); params.push(usernameFilter) }
-      if (entityIdFilter) { conditions.push('entity_id=?'); params.push(entityIdFilter) }
-      if (conditions.length) query += ' WHERE ' + conditions.join(' AND ')
-      query += ' ORDER BY timestamp DESC'
-      const result = await env.DB.prepare(query).bind(...params).all()
-      return json(result.results, 200, corsHeaders)
+      const page = await queryAuditPage(env.DB, url)
+      return json(page, 200, corsHeaders)
     }
 
-    // GET /nodes/:id/audit
+    // GET /nodes/:id/audit?limit=&offset=
     if (request.method === 'GET' && segments[0] === 'nodes' && segments[1] && segments[2] === 'audit') {
       const id = decodeURIComponent(segments[1])
-      const result = await env.DB.prepare(
-        'SELECT * FROM audit_log WHERE entity_id=? OR diff LIKE ? ORDER BY timestamp DESC'
-      ).bind(id, `%"${id}"%`).all()
-      return json(result.results, 200, corsHeaders)
+      const page = await queryAuditPage(env.DB, url, ['(entity_id=? OR diff LIKE ?)'], [id, `%"${id}"%`])
+      return json(page, 200, corsHeaders)
     }
 
     // POST /nodes

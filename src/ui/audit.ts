@@ -1,5 +1,5 @@
-import type { Node, AuditEntry } from '../types'
-import { fetchAuditLog, fetchNodeAuditLog } from '../storage/api'
+import type { Node, AuditEntry, AuditPage } from '../types'
+import { fetchAuditLog, fetchNodeAuditLog, AUDIT_PAGE_SIZE } from '../storage/api'
 
 let _panel: HTMLElement | null = null
 let _listEl: HTMLElement | null = null
@@ -10,6 +10,9 @@ let _currentEntityId: string | null = null
 let _getNodes: (() => Node[]) | null = null
 let _onSelect: ((node: Node) => void) | null = null
 let _allEntries: AuditEntry[] = []
+let _hasMore = false
+let _loadingMore = false
+let _scrollHandler: (() => void) | null = null
 let _clickOutside: ((e: MouseEvent) => void) | null = null
 
 function levenshtein(a: string, b: string): number {
@@ -221,33 +224,89 @@ function renderEntries(): void {
   }
 }
 
+function refreshUsernameOptions(): void {
+  if (!_usernameSelect) return
+  const prev = _usernameSelect.value
+  const usernames = [...new Set(_allEntries.map(e => e.username))].sort()
+  _usernameSelect.innerHTML = '<option value="">All users</option>'
+  for (const u of usernames) {
+    const opt = document.createElement('option')
+    opt.value = u
+    opt.textContent = u
+    if (u === prev) opt.selected = true
+    _usernameSelect.appendChild(opt)
+  }
+}
+
+async function fetchAuditPage(offset: number): Promise<AuditPage> {
+  const username = _usernameSelect?.value ?? ''
+  if (_currentEntityId) {
+    return fetchNodeAuditLog(_currentEntityId, { limit: AUDIT_PAGE_SIZE, offset })
+  }
+  return fetchAuditLog({
+    limit: AUDIT_PAGE_SIZE,
+    offset,
+    username: username || undefined,
+  })
+}
+
 async function loadAndRender(): Promise<void> {
   if (!_listEl) return
   _listEl.innerHTML = '<div style="padding:.75rem .5rem;color:#484f58;font-size:.8125rem">Loading…</div>'
+  _hasMore = false
+  _loadingMore = false
   try {
-    _allEntries = _currentEntityId
-      ? await fetchNodeAuditLog(_currentEntityId)
-      : await fetchAuditLog()
-
-    if (_usernameSelect) {
-      const prev = _usernameSelect.value
-      const usernames = [...new Set(_allEntries.map(e => e.username))].sort()
-      _usernameSelect.innerHTML = '<option value="">All users</option>'
-      for (const u of usernames) {
-        const opt = document.createElement('option')
-        opt.value = u
-        opt.textContent = u
-        if (u === prev) opt.selected = true
-        _usernameSelect.appendChild(opt)
-      }
-    }
-
+    const page = await fetchAuditPage(0)
+    _allEntries = page.entries
+    _hasMore = page.hasMore
+    refreshUsernameOptions()
     renderEntries()
+    maybePrefetchAudit()
   } catch (err) {
     if (_listEl) {
       _listEl.innerHTML = `<div style="padding:.75rem .5rem;color:#f85149;font-size:.8125rem">Failed to load: ${err instanceof Error ? err.message : String(err)}</div>`
     }
   }
+}
+
+async function loadMoreEntries(): Promise<void> {
+  if (!_listEl || !_hasMore || _loadingMore) return
+  _loadingMore = true
+  const sentinel = document.createElement('div')
+  sentinel.dataset.role = 'loading-more'
+  sentinel.textContent = 'Loading more…'
+  sentinel.style.cssText = 'padding:.5rem;color:#484f58;font-size:.75rem;font-style:italic;text-align:center;'
+  _listEl.appendChild(sentinel)
+  try {
+    const page = await fetchAuditPage(_allEntries.length)
+    _allEntries = [..._allEntries, ...page.entries]
+    _hasMore = page.hasMore
+    refreshUsernameOptions()
+    renderEntries()
+    maybePrefetchAudit()
+  } catch {
+    sentinel.textContent = 'Failed to load more'
+    sentinel.style.color = '#f85149'
+  } finally {
+    _loadingMore = false
+  }
+}
+
+function shouldLoadMoreAudit(): boolean {
+  if (!_listEl || !_hasMore || _loadingMore) return false
+  const { scrollTop, scrollHeight, clientHeight } = _listEl
+  if (scrollHeight <= clientHeight + 1) return true
+  return scrollTop + clientHeight >= scrollHeight * 0.5
+}
+
+function onAuditListScroll(): void {
+  if (shouldLoadMoreAudit()) void loadMoreEntries()
+}
+
+function maybePrefetchAudit(): void {
+  requestAnimationFrame(() => {
+    if (shouldLoadMoreAudit()) void loadMoreEntries()
+  })
 }
 
 function rebuildNotice(): void {
@@ -291,12 +350,18 @@ export function hideAuditPanel(): void {
     document.removeEventListener('mousedown', _clickOutside)
     _clickOutside = null
   }
+  if (_listEl && _scrollHandler) {
+    _listEl.removeEventListener('scroll', _scrollHandler)
+    _scrollHandler = null
+  }
   const p = _panel
   _panel = null
   _listEl = null
   _usernameSelect = null
   _searchInput = null
   _noticeEl = null
+  _hasMore = false
+  _loadingMore = false
   p.style.opacity = '0'
   p.style.transform = 'translateY(-4px)'
   setTimeout(() => p.remove(), 150)
@@ -319,6 +384,8 @@ export function showAuditPanel(
   _onSelect = onSelect
   _currentEntityId = getSelectedNodeId()
   _allEntries = []
+  _hasMore = false
+  _loadingMore = false
 
   const panel = document.createElement('div')
   _panel = panel
@@ -370,7 +437,7 @@ export function showAuditPanel(
   defaultOpt.value = ''
   defaultOpt.textContent = 'All users'
   usernameSelect.appendChild(defaultOpt)
-  usernameSelect.addEventListener('change', renderEntries)
+  usernameSelect.addEventListener('change', () => { void loadAndRender() })
 
   const searchInput = document.createElement('input')
   _searchInput = searchInput
@@ -392,6 +459,8 @@ export function showAuditPanel(
   const list = document.createElement('div')
   _listEl = list
   list.style.cssText = 'flex:1;overflow-y:auto;padding:.25rem .5rem .5rem;'
+  _scrollHandler = onAuditListScroll
+  list.addEventListener('scroll', _scrollHandler)
   panel.appendChild(list)
 
   document.body.appendChild(panel)

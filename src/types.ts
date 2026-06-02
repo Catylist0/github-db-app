@@ -42,3 +42,8 @@ export interface AuditEntry {
   entity_id: string
   diff: string
 }
+
+export interface AuditPage {
+  entries: AuditEntry[]
+  hasMore: boolean
+}
