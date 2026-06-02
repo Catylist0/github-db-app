@@ -703,5 +703,17 @@ export function addInteraction(
     applyTransform()
   }, { passive: false })
 
+  // Center on the average node position after layout
+  if (graph.nodes.length > 0) {
+    requestAnimationFrame(() => {
+      const cx = graph.nodes.reduce((s, n) => s + n.x, 0) / graph.nodes.length
+      const cy = graph.nodes.reduce((s, n) => s + n.y, 0) / graph.nodes.length
+      const svgRect = svg.getBoundingClientRect()
+      state.tx = svgRect.width / 2 - cx * state.scale
+      state.ty = svgRect.height / 2 - cy * state.scale
+      applyTransform()
+    })
+  }
+
   return { setAuthenticated, centerOnNode, undo: performUndo, redo: performRedo }
 }
