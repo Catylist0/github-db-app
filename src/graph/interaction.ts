@@ -22,6 +22,7 @@ export function addInteraction(
   viewport: SVGGElement,
   graph: Graph,
   api: GraphAPI,
+  options?: { onFocusNode?: (nodeId: string | null) => void },
 ): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } {
   svg.style.userSelect = 'none'
 
@@ -42,6 +43,16 @@ export function addInteraction(
   // ── Auth state ─────────────────────────────────────────────────────────────
 
   let authenticated = false
+
+  // ── Focus tracking ─────────────────────────────────────────────────────────
+
+  let _focusedNodeId: string | null = null
+
+  function setFocusedNode(nodeId: string | null): void {
+    if (_focusedNodeId === nodeId) return
+    _focusedNodeId = nodeId
+    options?.onFocusNode?.(nodeId)
+  }
 
   // ── Selection ──────────────────────────────────────────────────────────────
 
@@ -247,6 +258,7 @@ export function addInteraction(
     if (!node) return
     const edges = graph.edges.filter(e => e.from === id || e.to === id)
     record({ type: 'delete-node', node: { ...node }, edges: edges.map(e => ({ ...e })) })
+    setFocusedNode(null)
     hidePanel()
     internalRemoveNode(id)
     clearSelection()
@@ -255,6 +267,7 @@ export function addInteraction(
 
   function openPanel(node: Node, autoFocusName = false): void {
     const id = node.id
+    setFocusedNode(id)
     const isReadonly = !authenticated
     showPanel(
       node,
@@ -273,7 +286,7 @@ export function addInteraction(
         if (updated.status !== undefined) refreshHighlights()
         api.upsertNode(node).catch(console.error)
       },
-      clearSelection,
+      () => { setFocusedNode(null); clearSelection() },
       isReadonly ? undefined : () => handleDeleteNode(id),
       isReadonly ? false : autoFocusName,
       isReadonly,
@@ -350,6 +363,7 @@ export function addInteraction(
   // ── Undo / redo ────────────────────────────────────────────────────────────
 
   function applyEntry(entry: HistoryEntry, dir: 'undo' | 'redo'): void {
+    setFocusedNode(null)
     hidePanel()
     clearSelection()
     switch (entry.type) {
@@ -413,6 +427,7 @@ export function addInteraction(
     if (!auth) {
       setAddMode(false)
       clearHistory()
+      setFocusedNode(null)
     }
     hidePanel()
   }
@@ -524,6 +539,7 @@ export function addInteraction(
       boxEl.setAttribute('pointer-events', 'none')
       viewport.appendChild(boxEl)
     } else {
+      setFocusedNode(null)
       hidePanel()
       panning = true
       panStart = { x: me.clientX, y: me.clientY }

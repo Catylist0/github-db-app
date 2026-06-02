@@ -1,6 +1,6 @@
 import { getToken } from '../auth/github'
 import { WORKER_URL } from '../config'
-import type { Graph, Node, Edge } from '../types'
+import type { Graph, Node, Edge, AuditEntry } from '../types'
 
 let _onUnauthorized: ((reason: string) => void) | null = null
 export function onUnauthorized(fn: (reason: string) => void): void {
@@ -67,4 +67,12 @@ export async function upsertEdge(edge: Edge): Promise<void> {
 
 export async function deleteEdge(id: string): Promise<void> {
   await apiFetch(`/edges/${id}`, { method: 'DELETE' })
+}
+
+export async function fetchAuditLog(params?: { username?: string; entity_id?: string }): Promise<AuditEntry[]> {
+  const qs = new URLSearchParams()
+  if (params?.username) qs.set('username', params.username)
+  if (params?.entity_id) qs.set('entity_id', params.entity_id)
+  const queryStr = qs.toString()
+  return apiFetch(`/audit${queryStr ? `?${queryStr}` : ''}`) as Promise<AuditEntry[]>
 }

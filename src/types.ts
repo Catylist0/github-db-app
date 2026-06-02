@@ -26,3 +26,13 @@ export interface GraphAPI {
   upsertEdge: (edge: Edge) => Promise<void>
   deleteEdge: (id: string) => Promise<void>
 }
+
+export interface AuditEntry {
+  id: string
+  timestamp: string
+  username: string
+  action: string
+  entity_type: string
+  entity_id: string
+  diff: string
+}

@@ -1,6 +1,7 @@
 import type { Node } from '../types'
 
 let _panel: HTMLElement | null = null
+let _clickOutside: ((e: MouseEvent) => void) | null = null
 
 function levenshtein(a: string, b: string): number {
   const m = a.length
@@ -60,10 +61,15 @@ export function isSearchPanelOpen(): boolean {
 
 export function hideSearchPanel(): void {
   if (!_panel) return
+  if (_clickOutside) {
+    document.removeEventListener('mousedown', _clickOutside)
+    _clickOutside = null
+  }
   const p = _panel
   _panel = null
-  p.style.transform = 'translateX(-280px)'
-  setTimeout(() => p.remove(), 210)
+  p.style.opacity = '0'
+  p.style.transform = 'translateY(-4px)'
+  setTimeout(() => p.remove(), 150)
 }
 
 export function showSearchPanel(
@@ -76,61 +82,49 @@ export function showSearchPanel(
   _panel = panel
   panel.id = 'search-panel'
   panel.style.cssText =
-    'position:fixed;top:0;left:0;width:280px;height:100vh;' +
-    'background:#0d1117;border-right:1px solid #21262d;z-index:900;' +
-    'box-sizing:border-box;font-family:var(--font);display:flex;flex-direction:column;' +
-    'transform:translateX(-280px);transition:transform .2s ease;' +
-    'box-shadow:8px 0 24px rgba(0,0,0,.35);'
-
-  // Collapse tab on right edge
-  const collapseBar = document.createElement('div')
-  collapseBar.style.cssText =
-    'position:absolute;right:-12px;top:50%;transform:translateY(-50%);' +
-    'width:12px;height:2.5rem;background:#0d1117;' +
-    'border:1px solid #21262d;border-left:none;border-radius:0 3px 3px 0;' +
-    'cursor:pointer;display:flex;align-items:center;justify-content:center;' +
-    'color:#484f58;font-size:.65rem;transition:color .15s,background .15s;'
-  collapseBar.innerHTML = '&#8249;'
-  collapseBar.addEventListener('mouseenter', () => {
-    collapseBar.style.color = '#8b949e'
-    collapseBar.style.background = '#161b22'
-  })
-  collapseBar.addEventListener('mouseleave', () => {
-    collapseBar.style.color = '#484f58'
-    collapseBar.style.background = '#0d1117'
-  })
-  collapseBar.addEventListener('click', hideSearchPanel)
-  panel.appendChild(collapseBar)
+    'position:fixed;top:3.5rem;left:1rem;width:480px;max-height:60vh;' +
+    'background:#161b22;border:1px solid #30363d;border-radius:var(--radius);z-index:900;' +
+    'overflow:hidden;display:flex;flex-direction:column;' +
+    'box-shadow:0 8px 24px rgba(0,0,0,.5);font-family:var(--font);' +
+    'opacity:0;transform:translateY(-4px);transition:opacity .15s ease,transform .15s ease;'
 
   // Header
   const header = document.createElement('div')
-  header.style.cssText = 'padding:.875rem 1rem .5rem;flex-shrink:0;'
+  header.style.cssText =
+    'display:flex;align-items:center;justify-content:space-between;' +
+    'padding:.625rem .75rem .5rem;flex-shrink:0;border-bottom:1px solid #21262d;'
   const title = document.createElement('span')
   title.textContent = 'SEARCH'
-  title.style.cssText =
-    'font-size:.6875rem;color:#484f58;font-weight:600;letter-spacing:.07em;'
-  header.appendChild(title)
+  title.style.cssText = 'font-size:.6875rem;color:#484f58;font-weight:600;letter-spacing:.07em;'
+  const closeBtn = document.createElement('button')
+  closeBtn.textContent = '×'
+  closeBtn.style.cssText =
+    'background:none;border:none;color:#484f58;font-size:1.1rem;line-height:1;cursor:pointer;padding:.1rem .3rem;'
+  closeBtn.addEventListener('mouseenter', () => { closeBtn.style.color = '#e6edf3' })
+  closeBtn.addEventListener('mouseleave', () => { closeBtn.style.color = '#484f58' })
+  closeBtn.addEventListener('click', hideSearchPanel)
+  header.append(title, closeBtn)
   panel.appendChild(header)
 
   // Input
   const inputWrap = document.createElement('div')
-  inputWrap.style.cssText = 'padding:0 .75rem .75rem;flex-shrink:0;'
+  inputWrap.style.cssText = 'padding:.5rem .75rem;flex-shrink:0;'
   const input = document.createElement('input')
   input.type = 'text'
-  input.placeholder = 'Search nodes...'
+  input.placeholder = 'Search nodes…'
   input.setAttribute('autocomplete', 'off')
   input.style.cssText =
-    'background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);' +
-    'padding:.5rem .65rem;color:var(--text);font-size:.875rem;font-family:var(--font);' +
+    'background:#0d1117;border:1px solid #30363d;border-radius:var(--radius);' +
+    'padding:.4rem .6rem;color:#e6edf3;font-size:.875rem;font-family:var(--font);' +
     'width:100%;box-sizing:border-box;outline:none;transition:border-color .15s;'
-  input.addEventListener('focus', () => { input.style.borderColor = 'var(--accent)' })
-  input.addEventListener('blur', () => { input.style.borderColor = 'var(--border)' })
+  input.addEventListener('focus', () => { input.style.borderColor = '#58a6ff' })
+  input.addEventListener('blur', () => { input.style.borderColor = '#30363d' })
   inputWrap.appendChild(input)
   panel.appendChild(inputWrap)
 
   // Results
   const list = document.createElement('div')
-  list.style.cssText = 'flex:1;overflow-y:auto;padding:0 .5rem .5rem;'
+  list.style.cssText = 'flex:1;overflow-y:auto;padding:.25rem .5rem .5rem;'
   panel.appendChild(list)
 
   function renderResults(query: string): void {
@@ -151,7 +145,7 @@ export function showSearchPanel(
       row.style.cssText =
         'display:flex;align-items:center;gap:.5rem;padding:.35rem .5rem;' +
         'border-radius:4px;cursor:pointer;min-width:0;'
-      row.addEventListener('mouseenter', () => { row.style.background = '#161b22' })
+      row.addEventListener('mouseenter', () => { row.style.background = '#21262d' })
       row.addEventListener('mouseleave', () => { row.style.background = '' })
 
       const dot = document.createElement('span')
@@ -179,10 +173,20 @@ export function showSearchPanel(
   document.body.appendChild(panel)
   requestAnimationFrame(() =>
     requestAnimationFrame(() => {
-      panel.style.transform = 'translateX(0)'
+      panel.style.opacity = '1'
+      panel.style.transform = 'translateY(0)'
       input.focus()
     }),
   )
+
+  _clickOutside = (e: MouseEvent) => {
+    const t = e.target
+    if (t instanceof Element && t.closest('#search-panel')) return
+    hideSearchPanel()
+  }
+  setTimeout(() => {
+    if (_clickOutside) document.addEventListener('mousedown', _clickOutside)
+  }, 200)
 }
 
 export function toggleSearchPanel(

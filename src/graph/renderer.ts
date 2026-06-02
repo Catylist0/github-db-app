@@ -6,6 +6,7 @@ export function renderGraph(
   graph: Graph,
   container: HTMLElement,
   api: GraphAPI,
+  options?: { onFocusNode?: (nodeId: string | null) => void },
 ): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } {
   container.innerHTML = ''
 
@@ -61,5 +62,5 @@ export function renderGraph(
   }
 
   container.appendChild(svg)
-  return addInteraction(svg, viewport, graph, api)
+  return addInteraction(svg, viewport, graph, api, options)
 }

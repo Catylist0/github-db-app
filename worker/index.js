@@ -41,22 +41,34 @@ async function validateToken(token) {
   }
 
   const userRes = await fetch('https://api.github.com/user', { headers })
-  if (!userRes.ok) return { ok: false, reason: `invalid_token:${userRes.status}` }
+  if (!userRes.ok) return { ok: false, reason: `invalid_token:${userRes.status}`, username: null }
+
+  const user = await userRes.json()
+  const username = user.login
 
   const orgsRes = await fetch('https://api.github.com/user/orgs?per_page=100', { headers })
-  if (!orgsRes.ok) return { ok: false, reason: `orgs_fetch_failed:${orgsRes.status}` }
+  if (!orgsRes.ok) return { ok: false, reason: `orgs_fetch_failed:${orgsRes.status}`, username: null }
 
   const orgs = await orgsRes.json()
-  if (!Array.isArray(orgs)) return { ok: false, reason: 'orgs_unexpected_response' }
+  if (!Array.isArray(orgs)) return { ok: false, reason: 'orgs_unexpected_response', username: null }
 
   const isMember = orgs.some(o => o.login === ALLOWED_ORG)
-  return { ok: isMember, reason: isMember ? null : 'not_org_member' }
+  return { ok: isMember, reason: isMember ? null : 'not_org_member', username }
 }
 
 async function initSchema(db) {
   await db.batch([
     db.prepare('CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL)'),
     db.prepare('CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL)'),
+    db.prepare(`CREATE TABLE IF NOT EXISTS audit_log (
+      id TEXT PRIMARY KEY,
+      timestamp TEXT NOT NULL,
+      username TEXT NOT NULL,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      diff TEXT NOT NULL
+    )`),
   ])
   try {
     await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run()
@@ -170,30 +182,73 @@ export default {
       return json(data, 200, corsHeaders)
     }
 
+    // GET /audit
+    if (request.method === 'GET' && path === '/audit') {
+      let query = 'SELECT * FROM audit_log'
+      const conditions = []
+      const params = []
+      const usernameFilter = url.searchParams.get('username')
+      const entityIdFilter = url.searchParams.get('entity_id')
+      if (usernameFilter) { conditions.push('username=?'); params.push(usernameFilter) }
+      if (entityIdFilter) { conditions.push('entity_id=?'); params.push(entityIdFilter) }
+      if (conditions.length) query += ' WHERE ' + conditions.join(' AND ')
+      query += ' ORDER BY timestamp DESC'
+      const result = await env.DB.prepare(query).bind(...params).all()
+      return json(result.results, 200, corsHeaders)
+    }
+
+    // GET /nodes/:id/audit
+    if (request.method === 'GET' && segments[0] === 'nodes' && segments[1] && segments[2] === 'audit') {
+      const id = decodeURIComponent(segments[1])
+      const result = await env.DB.prepare(
+        'SELECT * FROM audit_log WHERE entity_id=? OR diff LIKE ? ORDER BY timestamp DESC'
+      ).bind(id, `%"${id}"%`).all()
+      return json(result.results, 200, corsHeaders)
+    }
+
     // POST /nodes
     if (request.method === 'POST' && path === '/nodes') {
       const { id, label, x, y, description, status } = await request.json()
       await env.DB.prepare('INSERT INTO nodes (id,label,x,y,description,status) VALUES (?,?,?,?,?,?)')
         .bind(id, label, x, y, description ?? null, status ?? 'planned').run()
+      const after = { id, label, x, y, description: description ?? null, status: status ?? 'planned' }
+      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_node', 'node', id, JSON.stringify({ before: null, after })).run()
       return json({ ok: true }, 201, corsHeaders)
     }
 
     // PATCH /nodes/:id
-    if (request.method === 'PATCH' && segments[0] === 'nodes' && segments[1]) {
+    if (request.method === 'PATCH' && segments[0] === 'nodes' && segments[1] && segments.length === 2) {
       const id = decodeURIComponent(segments[1])
+      const before = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
       const { label, x, y, description, status } = await request.json()
       await env.DB.prepare('INSERT OR REPLACE INTO nodes (id,label,x,y,description,status) VALUES (?,?,?,?,?,?)')
         .bind(id, label, x, y, description ?? null, status ?? 'planned').run()
+      const after = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
+      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'update_node', 'node', id, JSON.stringify({ before, after })).run()
       return json({ ok: true }, 200, corsHeaders)
     }
 
     // DELETE /nodes/:id
-    if (request.method === 'DELETE' && segments[0] === 'nodes' && segments[1]) {
+    if (request.method === 'DELETE' && segments[0] === 'nodes' && segments[1] && segments.length === 2) {
       const id = decodeURIComponent(segments[1])
+      const before = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
+      const cascadedEdges = (await env.DB.prepare('SELECT * FROM edges WHERE source=? OR target=?').bind(id, id).all()).results
       await env.DB.batch([
         env.DB.prepare('DELETE FROM edges WHERE source=? OR target=?').bind(id, id),
         env.DB.prepare('DELETE FROM nodes WHERE id=?').bind(id),
       ])
+      const now = new Date().toISOString()
+      const auditStmts = [
+        ...cascadedEdges.map(edge =>
+          env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+            .bind(crypto.randomUUID(), now, auth.username, 'delete_edge', 'edge', edge.id, JSON.stringify({ before: edge, after: null }))
+        ),
+        env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+          .bind(crypto.randomUUID(), now, auth.username, 'delete_node', 'node', id, JSON.stringify({ before, after: null })),
+      ]
+      await env.DB.batch(auditStmts)
       return json({ ok: true }, 200, corsHeaders)
     }
 
@@ -202,13 +257,19 @@ export default {
       const { id, source, target } = await request.json()
       await env.DB.prepare('INSERT OR IGNORE INTO edges (id,source,target) VALUES (?,?,?)')
         .bind(id, source, target).run()
+      const after = { id, source, target }
+      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_edge', 'edge', id, JSON.stringify({ before: null, after })).run()
       return json({ ok: true }, 201, corsHeaders)
     }
 
     // DELETE /edges/:id
     if (request.method === 'DELETE' && segments[0] === 'edges' && segments[1]) {
       const id = decodeURIComponent(segments[1])
+      const before = (await env.DB.prepare('SELECT * FROM edges WHERE id=?').bind(id).first()) ?? null
       await env.DB.prepare('DELETE FROM edges WHERE id=?').bind(id).run()
+      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'delete_edge', 'edge', id, JSON.stringify({ before, after: null })).run()
       return json({ ok: true }, 200, corsHeaders)
     }
 

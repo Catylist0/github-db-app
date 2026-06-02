@@ -3,12 +3,14 @@ import { loadGraph, upsertNode, deleteNode, upsertEdge, deleteEdge, onUnauthoriz
 import { renderGraph } from './graph/renderer'
 import { hidePanel } from './ui/panel'
 import { hideSearchPanel, toggleSearchPanel, isSearchPanelOpen } from './ui/search'
+import { hideAuditPanel, toggleAuditPanel, isAuditPanelOpen, updateAuditPanelSelection } from './ui/audit'
 import type { Graph } from './types'
 
 let _controls: { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } | null = null
 let _username: string | null = null
-let _authHeader: HTMLElement | null = null
+let _authBar: HTMLElement | null = null
 let _graph: Graph | null = null
+let _selectedNodeId: string | null = null
 
 // ── Error banner ──────────────────────────────────────────────────────────────
 
@@ -33,18 +35,16 @@ function showErrorBanner(message: string): void {
   document.body.prepend(el)
 }
 
-// ── Auth header (top-left) ────────────────────────────────────────────────────
+// ── Auth bar (top-left) ───────────────────────────────────────────────────────
 
-const AUTH_CONTROL =
+const AUTH_ITEM =
   'display:inline-flex;align-items:center;justify-content:center;height:2rem;' +
-  'padding:0 .75rem;font-size:.8125rem;font-family:var(--font);white-space:nowrap;'
+  'font-size:.8125rem;font-family:var(--font);white-space:nowrap;' +
+  'background:var(--surface);border:1px solid var(--border);border-right:none;'
 
 function pill(text: string): HTMLElement {
   const el = document.createElement('div')
-  el.style.cssText =
-    AUTH_CONTROL +
-    'background:var(--surface);border:1px solid var(--border);' +
-    'color:var(--text-muted);border-right:none;'
+  el.style.cssText = AUTH_ITEM + 'padding:0 .75rem;color:var(--text-muted);'
   el.textContent = text
   return el
 }
@@ -53,30 +53,67 @@ function authBtn(text: string, onClick: () => void): HTMLElement {
   const el = document.createElement('button')
   el.type = 'button'
   el.textContent = text
-  el.style.cssText =
-    AUTH_CONTROL +
-    'background:var(--surface);border:1px solid var(--border);' +
-    'color:var(--text);cursor:pointer;transition:color .15s,background .15s;'
-  el.addEventListener('mouseenter', () => {
-    el.style.color = '#fff'
-    el.style.background = 'var(--surface-elevated)'
-  })
-  el.addEventListener('mouseleave', () => {
-    el.style.color = 'var(--text)'
-    el.style.background = 'var(--surface)'
-  })
+  el.style.cssText = AUTH_ITEM + 'padding:0 .75rem;color:var(--text);cursor:pointer;transition:color .15s,background .15s;'
+  el.addEventListener('mouseenter', () => { el.style.color = '#fff'; el.style.background = 'var(--surface-elevated)' })
+  el.addEventListener('mouseleave', () => { el.style.color = 'var(--text)'; el.style.background = 'var(--surface)' })
   el.addEventListener('click', onClick)
   return el
 }
 
-function updateAuthHeader(): void {
-  if (!_authHeader) return
-  _authHeader.innerHTML = ''
+function iconBtn(icon: string, title: string, onClick: () => void, getId?: string): HTMLElement {
+  const el = document.createElement('button')
+  el.type = 'button'
+  el.textContent = icon
+  el.title = title
+  if (getId) el.id = getId
+  el.style.cssText =
+    AUTH_ITEM +
+    'width:2rem;padding:0;color:var(--text-muted);cursor:pointer;' +
+    'font-size:.95rem;transition:color .15s,background .15s;'
+  el.addEventListener('mouseenter', () => { el.style.color = '#e6edf3'; el.style.background = 'var(--surface-elevated)' })
+  el.addEventListener('mouseleave', () => { el.style.color = 'var(--text-muted)'; el.style.background = 'var(--surface)' })
+  el.addEventListener('click', onClick)
+  return el
+}
+
+function updateAuthBar(): void {
+  if (!_authBar) return
+  _authBar.innerHTML = ''
+
+  const items: HTMLElement[] = []
+
   if (_username) {
-    _authHeader.append(pill(`Logged in as ${_username}`), authBtn('Log out', handleLogout))
+    items.push(pill(`Logged in as ${_username}`))
+    items.push(authBtn('Log out', handleLogout))
   } else {
-    _authHeader.append(authBtn('Login with GitHub', login))
+    items.push(authBtn('Login with GitHub', login))
   }
+
+  items.push(
+    iconBtn('⌕', 'Search (⌘K)', () => {
+      if (isAuditPanelOpen()) hideAuditPanel()
+      toggleSearchPanel(
+        () => _graph?.nodes ?? [],
+        (node) => _controls?.centerOnNode(node.id),
+      )
+    }),
+  )
+
+  items.push(
+    iconBtn('≡', 'Audit log', () => {
+      if (isSearchPanelOpen()) hideSearchPanel()
+      toggleAuditPanel(
+        () => _graph?.nodes ?? [],
+        (node) => _controls?.centerOnNode(node.id),
+        () => _selectedNodeId,
+      )
+    }),
+  )
+
+  // Last item gets the closing right border
+  items[items.length - 1].style.borderRight = '1px solid var(--border)'
+
+  _authBar.append(...items)
 }
 
 function handleLogout(): void {
@@ -84,7 +121,7 @@ function handleLogout(): void {
   _username = null
   _controls?.setAuthenticated(false)
   hidePanel()
-  updateAuthHeader()
+  updateAuthBar()
 }
 
 // ── OAuth callback ────────────────────────────────────────────────────────────
@@ -117,7 +154,7 @@ async function handleOAuthCallback(): Promise<void> {
   try {
     _username = await fetchUsername(token)
     _controls?.setAuthenticated(true)
-    updateAuthHeader()
+    updateAuthBar()
   } catch (err) {
     logout()
     showErrorBanner(err instanceof Error ? err.message : String(err))
@@ -129,41 +166,15 @@ async function handleOAuthCallback(): Promise<void> {
 async function init(): Promise<void> {
   const app = document.getElementById('app')!
 
-  // Auth header — top-left
-  _authHeader = document.createElement('div')
-  _authHeader.style.cssText =
+  // Auth bar — top-left, all controls inline
+  _authBar = document.createElement('div')
+  _authBar.id = 'auth-bar'
+  _authBar.style.cssText =
     'position:fixed;top:1rem;left:1rem;display:flex;align-items:center;' +
     'border-radius:var(--radius);overflow:hidden;z-index:500;' +
     'box-shadow:0 4px 16px rgba(0,0,0,.4);'
-  document.body.appendChild(_authHeader)
-  updateAuthHeader()
-
-  // Search toggle button — below auth bar
-  const searchBtn = document.createElement('button')
-  searchBtn.type = 'button'
-  searchBtn.textContent = '⌕'
-  searchBtn.title = 'Search (⌘K)'
-  searchBtn.style.cssText =
-    'position:fixed;top:3.75rem;left:1rem;width:2rem;height:2rem;' +
-    'background:#161b22;border:1px solid #30363d;border-radius:var(--radius);' +
-    'color:#8b949e;font-size:.95rem;font-family:var(--font);' +
-    'cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:500;' +
-    'box-shadow:0 4px 16px rgba(0,0,0,.4);transition:color .15s,background .15s;'
-  searchBtn.addEventListener('mouseenter', () => {
-    searchBtn.style.color = '#e6edf3'
-    searchBtn.style.background = '#21262d'
-  })
-  searchBtn.addEventListener('mouseleave', () => {
-    searchBtn.style.color = '#8b949e'
-    searchBtn.style.background = '#161b22'
-  })
-  searchBtn.addEventListener('click', () => {
-    toggleSearchPanel(
-      () => _graph?.nodes ?? [],
-      (node) => _controls?.centerOnNode(node.id),
-    )
-  })
-  document.body.appendChild(searchBtn)
+  document.body.appendChild(_authBar)
+  updateAuthBar()
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -183,14 +194,16 @@ async function init(): Promise<void> {
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault()
+      if (isAuditPanelOpen()) hideAuditPanel()
       toggleSearchPanel(
         () => _graph?.nodes ?? [],
         (node) => _controls?.centerOnNode(node.id),
       )
       return
     }
-    if (e.key === 'Escape' && isSearchPanelOpen()) {
-      hideSearchPanel()
+    if (e.key === 'Escape') {
+      if (isSearchPanelOpen()) { hideSearchPanel(); return }
+      if (isAuditPanelOpen()) { hideAuditPanel(); return }
     }
   })
 
@@ -201,7 +214,7 @@ async function init(): Promise<void> {
       logout()
       _username = null
       _controls?.setAuthenticated(false)
-      updateAuthHeader()
+      updateAuthBar()
     }
   })
 
@@ -211,7 +224,12 @@ async function init(): Promise<void> {
     const graph = await loadGraph()
     _graph = graph
     app.style.cssText = ''
-    _controls = renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge })
+    _controls = renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge }, {
+      onFocusNode: (nodeId) => {
+        _selectedNodeId = nodeId
+        updateAuditPanelSelection(nodeId)
+      },
+    })
     await handleOAuthCallback()
   } catch (err) {
     app.style.cssText = 'display:flex;align-items:center;justify-content:center;'
