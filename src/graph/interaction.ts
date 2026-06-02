@@ -130,38 +130,61 @@ export function addInteraction(
     }
   }
 
-  function svgIconBtn(icon: string, hoverColor: string, onClick: (e: MouseEvent) => void): SVGGElement {
+  // Clipboard shape: body (x: -4.5…4.5, y: -2.5…5.5) + clip notch (x: -2…2, y: -5.5…-2.5)
+  function makeClipboardIcon(): SVGElement {
+    const path = svgEl('path')
+    path.setAttribute('d', 'M-2,-5.5 L2,-5.5 L2,-2.5 L4.5,-2.5 L4.5,5.5 L-4.5,5.5 L-4.5,-2.5 L-2,-2.5 Z')
+    return path
+  }
+
+  function svgIconBtn(
+    icon: string | SVGElement,
+    hoverColor: string,
+    onClick: (e: MouseEvent) => void,
+    opts: { r?: number; fontSize?: number } = {},
+  ): SVGGElement {
+    const r = opts.r ?? 11
+    const fontSize = opts.fontSize ?? 14
+
     const g = svgEl('g')
     g.style.cursor = 'pointer'
+    g.style.color = '#c9d1d9'   // drives fill:currentColor on inner content
 
     const circle = svgEl('circle')
-    circle.setAttribute('r', '11')
+    circle.setAttribute('r', String(r))
     circle.setAttribute('fill', '#161b22')
     circle.setAttribute('stroke', '#30363d')
     circle.setAttribute('stroke-width', '1.5')
-
-    const text = svgEl('text')
-    text.setAttribute('text-anchor', 'middle')
-    text.setAttribute('dominant-baseline', 'central')
-    text.setAttribute('fill', '#c9d1d9')
-    text.setAttribute('font-size', '14')
-    text.setAttribute('font-family', "'Segoe UI Symbol','Apple Color Emoji','Noto Emoji',system-ui,sans-serif")
-    text.setAttribute('pointer-events', 'none')
-    text.style.userSelect = 'none'
-    text.textContent = icon
-
     g.appendChild(circle)
-    g.appendChild(text)
+
+    if (typeof icon === 'string') {
+      const text = svgEl('text')
+      text.setAttribute('text-anchor', 'middle')
+      text.setAttribute('dominant-baseline', 'central')
+      text.setAttribute('fill', 'currentColor')
+      text.setAttribute('font-size', String(fontSize))
+      text.setAttribute('font-family', "'Segoe UI Symbol','Apple Color Emoji','Noto Emoji',system-ui,sans-serif")
+      text.setAttribute('pointer-events', 'none')
+      text.style.userSelect = 'none'
+      text.textContent = icon
+      g.appendChild(text)
+    } else {
+      const wrap = svgEl('g')
+      wrap.setAttribute('fill', 'currentColor')
+      wrap.setAttribute('pointer-events', 'none')
+      wrap.appendChild(icon)
+      g.appendChild(wrap)
+    }
 
     g.addEventListener('mouseenter', () => {
       circle.setAttribute('fill', '#21262d')
       circle.setAttribute('stroke', hoverColor)
-      text.setAttribute('fill', '#e6edf3')
+      g.style.color = '#e6edf3'
     })
     g.addEventListener('mouseleave', () => {
       circle.setAttribute('fill', '#161b22')
       circle.setAttribute('stroke', '#30363d')
-      text.setAttribute('fill', '#c9d1d9')
+      g.style.color = '#c9d1d9'
     })
     g.addEventListener('mousedown', e => e.stopPropagation())
     g.addEventListener('click', onClick)
@@ -186,10 +209,11 @@ export function addInteraction(
   function buildIconCluster(edge: Edge, midVpX: number, midVpY: number): SVGGElement {
     const g = svgEl('g')
 
-    const items: Array<{ icon: string; color: string; fn: (e: MouseEvent) => void }> = []
+    type Item = { icon: string | SVGElement; color: string; r?: number; fontSize?: number; fn: (e: MouseEvent) => void }
+    const items: Item[] = []
 
     if (edgeClipboard) {
-      items.push({ icon: '⏙', color: '#22c55e', fn: (e) => {
+      items.push({ icon: makeClipboardIcon(), color: '#22c55e', fn: (e) => {
         e.stopPropagation()
         if (!edgeClipboard) return
         applyEdgePatch(edge, { ...edgeClipboard })
@@ -201,7 +225,7 @@ export function addInteraction(
       edgeClipboard = { routing: edge.routing, style: edge.style, vanish: edge.vanish }
       updateIconClusters()
     }})
-    items.push({ icon: '⚙', color: '#f97316', fn: (e) => {
+    items.push({ icon: '⚙', color: '#f97316', r: 14, fontSize: 26, fn: (e) => {
       e.stopPropagation()
       const sc = vpToScreen(midVpX, midVpY)
       clearIconClusters()
@@ -220,12 +244,13 @@ export function addInteraction(
       )
     }})
 
-    const spacing = 24
+    const spacing = 30
     const totalW = (items.length - 1) * spacing
     const offsetX = -totalW / 2
 
     for (let i = 0; i < items.length; i++) {
-      const btn = svgIconBtn(items[i].icon, items[i].color, items[i].fn)
+      const { icon, color, r, fontSize, fn } = items[i]
+      const btn = svgIconBtn(icon, color, fn, { r, fontSize })
       btn.setAttribute('transform', `translate(${offsetX + i * spacing},0)`)
       g.appendChild(btn)
     }
