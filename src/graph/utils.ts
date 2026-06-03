@@ -3,10 +3,10 @@ import type { Node, Edge, EdgeRouting } from '../types'
 const NS = 'http://www.w3.org/2000/svg'
 
 export const NODE_CLASS_FILLS: Record<string, string> = {
-  UI:       '#1a3a5c',
-  Logic:    '#2e1a52',
-  Graphics: '#16382a',
-  Sound:    '#3c2210',
+  UI:       '#1a3d2b',
+  Logic:    '#4a1212',
+  Graphics: '#2e1a52',
+  Sound:    '#4a2e14',
 }
 export const NODE_DEFAULT_FILL = '#1f2937'
 
