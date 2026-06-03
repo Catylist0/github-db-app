@@ -365,6 +365,7 @@ export function addInteraction(
     }
 
     if (authenticated) updateIconClusters()
+    alignPanel.style.display = (authenticated && selectedNodes.size >= 2) ? 'flex' : 'none'
   }
 
   function selectNode(id: string): void {
@@ -596,6 +597,57 @@ export function addInteraction(
 
   addBtn.addEventListener('click', () => setAddMode(!addMode))
 
+  // ── Alignment panel ───────────────────────────────────────────────────────
+
+  const alignPanel = document.createElement('div')
+  alignPanel.style.cssText =
+    'position:fixed;bottom:3.5rem;left:1rem;display:none;flex-direction:column;gap:.375rem;z-index:100;'
+  document.body.appendChild(alignPanel)
+
+  const alignBtnBase =
+    'height:1.875rem;padding:0 .75rem;' +
+    'background:#0d1117;border:1px solid #30363d;' +
+    'color:#8b949e;font-size:.8rem;font-family:system-ui;letter-spacing:.02em;' +
+    'cursor:pointer;display:flex;align-items:center;justify-content:center;' +
+    'transition:background .15s,color .15s,border-color .15s;'
+
+  function makeAlignBtn(label: string, onClick: () => void): HTMLButtonElement {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.textContent = label
+    btn.style.cssText = alignBtnBase
+    btn.addEventListener('mouseenter', () => {
+      btn.style.background = '#e6edf3'
+      btn.style.color = '#0d1117'
+      btn.style.borderColor = '#e6edf3'
+    })
+    btn.addEventListener('mouseleave', () => {
+      btn.style.background = '#0d1117'
+      btn.style.color = '#8b949e'
+      btn.style.borderColor = '#30363d'
+    })
+    btn.addEventListener('click', onClick)
+    return btn
+  }
+
+  function performAlign(axis: 'x' | 'y'): void {
+    if (selectedNodes.size < 2) return
+    const ids = [...selectedNodes]
+    const nodes = ids.map(id => graph.nodes.find(n => n.id === id)).filter((n): n is Node => !!n)
+    const avg = Math.round(nodes.reduce((s, n) => s + n[axis], 0) / nodes.length)
+    const moves = nodes.map(n => ({
+      id: n.id,
+      from: { x: n.x, y: n.y },
+      to: { x: axis === 'x' ? avg : n.x, y: axis === 'y' ? avg : n.y },
+    }))
+    for (const m of moves) internalMoveNode(m.id, m.to)
+    record({ type: 'move-nodes', moves })
+    rebuildAllVanish()
+  }
+
+  alignPanel.appendChild(makeAlignBtn('Align horizontal', () => performAlign('y')))
+  alignPanel.appendChild(makeAlignBtn('Align vertical', () => performAlign('x')))
+
   let pendingAddPos: { x: number; y: number } | null = null
   let pendingAddClientStart = { x: 0, y: 0 }
   let pendingCtrlAddPos: { x: number; y: number } | null = null
@@ -701,6 +753,7 @@ export function addInteraction(
       setFocusedNode(null)
       clearIconClusters()
       closeEdgeDialog()
+      alignPanel.style.display = 'none'
     }
     hidePanel()
   }

@@ -75,6 +75,7 @@ async function initSchema(db) {
   ])
   try { await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run() } catch { /* exists */ }
   try { await db.prepare("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'planned'").run() } catch { /* exists */ }
+  try { await db.prepare('ALTER TABLE nodes ADD COLUMN node_class TEXT').run() } catch { /* exists */ }
   try { await db.prepare("ALTER TABLE edges ADD COLUMN routing TEXT NOT NULL DEFAULT 'straight'").run() } catch { /* exists */ }
   try { await db.prepare("ALTER TABLE edges ADD COLUMN style TEXT NOT NULL DEFAULT 'solid'").run() } catch { /* exists */ }
   try { await db.prepare('ALTER TABLE edges ADD COLUMN vanish INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
@@ -246,9 +247,9 @@ export default {
     if (request.method === 'PATCH' && segments[0] === 'nodes' && segments[1] && segments.length === 2) {
       const id = decodeURIComponent(segments[1])
       const before = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
-      const { label, x, y, description, status } = await request.json()
-      await env.DB.prepare('INSERT OR REPLACE INTO nodes (id,label,x,y,description,status) VALUES (?,?,?,?,?,?)')
-        .bind(id, label, x, y, description ?? null, status ?? 'planned').run()
+      const { label, x, y, description, status, node_class } = await request.json()
+      await env.DB.prepare('INSERT OR REPLACE INTO nodes (id,label,x,y,description,status,node_class) VALUES (?,?,?,?,?,?,?)')
+        .bind(id, label, x, y, description ?? null, status ?? 'planned', node_class ?? null).run()
       const after = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
       await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
         .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'update_node', 'node', id, JSON.stringify({ before, after })).run()

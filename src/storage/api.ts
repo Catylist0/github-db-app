@@ -38,11 +38,11 @@ export async function loadGraph(): Promise<Graph> {
     throw new Error(`GET /graph: ${res.status}${body ? ` — ${body}` : ''}`)
   }
   const data = await res.json() as {
-    nodes: Node[]
+    nodes: Array<Omit<Node, 'nodeClass'> & { node_class?: string | null }>
     edges: Array<{ id: string; source: string; target: string; routing?: string; style?: string; vanish?: number }>
   }
   return {
-    nodes: data.nodes,
+    nodes: data.nodes.map(n => ({ ...n, nodeClass: (n.node_class ?? undefined) as Node['nodeClass'] })),
     edges: data.edges.map(e => ({
       id: e.id,
       from: e.source,
@@ -57,7 +57,7 @@ export async function loadGraph(): Promise<Graph> {
 export async function upsertNode(node: Node): Promise<void> {
   await apiFetch(`/nodes/${node.id}`, {
     method: 'PATCH',
-    body: JSON.stringify({ label: node.label, x: node.x, y: node.y, description: node.description ?? null, status: node.status }),
+    body: JSON.stringify({ label: node.label, x: node.x, y: node.y, description: node.description ?? null, status: node.status, node_class: node.nodeClass ?? null }),
   })
 }
 
