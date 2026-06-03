@@ -1,4 +1,4 @@
-import type { Node, Edge, NodeStatus } from '../types'
+import type { Node, Edge, NodeStatus, NodeClass } from '../types'
 
 export type MoveRecord = {
   id: string
@@ -13,6 +13,7 @@ export type HistoryEntry =
   | { type: 'rename-node'; id: string; from: string; to: string }
   | { type: 'status-node'; id: string; from: NodeStatus; to: NodeStatus }
   | { type: 'description-node'; id: string; from: string | undefined; to: string | undefined }
+  | { type: 'class-node'; id: string; from: NodeClass | undefined; to: NodeClass | undefined }
   | { type: 'create-edge'; edge: Edge }
   | { type: 'delete-edge'; edge: Edge }
 

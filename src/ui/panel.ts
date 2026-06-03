@@ -1,5 +1,6 @@
 import { marked } from 'marked'
-import type { Node, NodeStatus } from '../types'
+import type { Node, NodeClass, NodeStatus } from '../types'
+import { NODE_CLASS_FILLS, NODE_DEFAULT_FILL } from '../graph/utils'
 
 let pendingClose: (() => void) | undefined
 
@@ -231,6 +232,69 @@ export function showPanel(
     'flex-shrink:0;display:flex;flex-direction:column;gap:.625rem;' +
     'padding:.875rem 1.25rem 1rem;border-top:1px solid var(--border-muted);'
   panel.appendChild(footer)
+
+  // ── Class ─────────────────────────────────────────────────────────────────
+  const classField = fieldWrap()
+  classField.appendChild(sectionLabel('Class'))
+
+  const classDefs: Array<{ value: NodeClass | ''; label: string; color: string }> = [
+    { value: '',         label: 'None',     color: NODE_DEFAULT_FILL },
+    { value: 'UI',       label: 'UI',       color: NODE_CLASS_FILLS.UI },
+    { value: 'Logic',    label: 'Logic',    color: NODE_CLASS_FILLS.Logic },
+    { value: 'Graphics', label: 'Graphics', color: NODE_CLASS_FILLS.Graphics },
+    { value: 'Sound',    label: 'Sound',    color: NODE_CLASS_FILLS.Sound },
+  ]
+
+  const classWrap = document.createElement('div')
+  classWrap.style.cssText =
+    'display:flex;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;'
+
+  let currentClass: NodeClass | '' = node.nodeClass ?? ''
+  const classBtns: HTMLButtonElement[] = []
+
+  function applyClassHighlight(): void {
+    for (let i = 0; i < classDefs.length; i++) {
+      const { color, value } = classDefs[i]
+      const btn = classBtns[i]
+      const active = value === currentClass
+      btn.style.background = active ? color : 'var(--bg)'
+      btn.style.color = active ? '#e6edf3' : '#8b949e'
+      btn.style.fontWeight = active ? '600' : '400'
+      btn.style.borderColor = active ? color : 'var(--border)'
+    }
+  }
+
+  for (let i = 0; i < classDefs.length; i++) {
+    const c = classDefs[i]
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.textContent = c.value || '—'
+    btn.disabled = readonly
+    btn.style.cssText =
+      'flex:1;border:none;padding:.45rem .2rem;font-size:.7rem;font-family:var(--font);' +
+      `cursor:${readonly ? 'default' : 'pointer'};` +
+      'background:var(--bg);transition:background .15s,color .15s;' +
+      (i < classDefs.length - 1 ? 'border-right:1px solid var(--border);' : '')
+    if (!readonly) {
+      btn.addEventListener('mouseenter', () => {
+        if (c.value !== currentClass) btn.style.background = 'var(--surface-elevated)'
+      })
+      btn.addEventListener('mouseleave', () => {
+        if (c.value !== currentClass) btn.style.background = 'var(--bg)'
+      })
+      btn.addEventListener('click', () => {
+        currentClass = c.value
+        applyClassHighlight()
+        onUpdate({ nodeClass: (c.value || undefined) as NodeClass | undefined })
+      })
+    }
+    classBtns.push(btn)
+    classWrap.appendChild(btn)
+  }
+
+  applyClassHighlight()
+  classField.appendChild(classWrap)
+  footer.appendChild(classField)
 
   // ── Status buttons ────────────────────────────────────────────────────────
   const statusField = fieldWrap()

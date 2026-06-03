@@ -2,6 +2,18 @@ import type { Node, Edge, EdgeRouting } from '../types'
 
 const NS = 'http://www.w3.org/2000/svg'
 
+export const NODE_CLASS_FILLS: Record<string, string> = {
+  UI:       '#1a3a5c',
+  Logic:    '#2e1a52',
+  Graphics: '#16382a',
+  Sound:    '#3c2210',
+}
+export const NODE_DEFAULT_FILL = '#1f2937'
+
+export function nodeClassFill(cls?: string | null): string {
+  return cls ? (NODE_CLASS_FILLS[cls] ?? NODE_DEFAULT_FILL) : NODE_DEFAULT_FILL
+}
+
 export function svgEl<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementTagNameMap[K] {
   return document.createElementNS(NS, tag) as SVGElementTagNameMap[K]
 }
@@ -390,7 +402,7 @@ export function makeNodeEl(node: Node, borderColor = '#4b5563', pulse = false): 
   rect.setAttribute('width', '120')
   rect.setAttribute('height', '40')
   rect.setAttribute('rx', '8')
-  rect.setAttribute('fill', '#1f2937')
+  rect.setAttribute('fill', nodeClassFill(node.nodeClass))
   rect.setAttribute('stroke', borderColor)
   rect.setAttribute('stroke-width', String(NODE_STROKE_WIDTH))
 

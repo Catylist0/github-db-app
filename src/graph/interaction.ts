@@ -5,6 +5,7 @@ import {
   makeNodeEl,
   nodeBorderColor,
   nodeIsReady,
+  nodeClassFill,
   setPulse,
   NODE_STROKE_WIDTH,
   SELECTED_NODE_STROKE_WIDTH,
@@ -470,7 +471,7 @@ export function addInteraction(
 
   function internalUpdateNode(
     id: string,
-    patch: Partial<Pick<Node, 'label' | 'status' | 'description'>>,
+    patch: Partial<Pick<Node, 'label' | 'status' | 'description' | 'nodeClass'>>,
   ): void {
     const node = graph.nodes.find(n => n.id === id)
     if (!node) return
@@ -480,6 +481,10 @@ export function addInteraction(
       if (textEl) textEl.textContent = patch.label
     }
     if (patch.status !== undefined) refreshHighlights()
+    if ('nodeClass' in patch) {
+      const rectEl = viewport.querySelector<SVGRectElement>(`[data-node-id="${id}"] rect`)
+      if (rectEl) rectEl.setAttribute('fill', nodeClassFill(node.nodeClass))
+    }
     api.upsertNode(node).catch(console.error)
   }
 
@@ -534,12 +539,18 @@ export function addInteraction(
           record({ type: 'status-node', id, from: node.status, to: updated.status })
         if (updated.description !== undefined)
           record({ type: 'description-node', id, from: node.description, to: updated.description })
+        if ('nodeClass' in updated)
+          record({ type: 'class-node', id, from: node.nodeClass, to: updated.nodeClass })
         Object.assign(node, updated)
         if (updated.label !== undefined) {
           const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
           if (textEl) textEl.textContent = updated.label
         }
         if (updated.status !== undefined) refreshHighlights()
+        if ('nodeClass' in updated) {
+          const rectEl = viewport.querySelector<SVGRectElement>(`[data-node-id="${id}"] rect`)
+          if (rectEl) rectEl.setAttribute('fill', nodeClassFill(node.nodeClass))
+        }
         api.upsertNode(node).catch(console.error)
       },
       () => { setFocusedNode(null); clearSelection() },
@@ -647,6 +658,9 @@ export function addInteraction(
         break
       case 'description-node':
         internalUpdateNode(entry.id, { description: dir === 'undo' ? entry.from : entry.to })
+        break
+      case 'class-node':
+        internalUpdateNode(entry.id, { nodeClass: dir === 'undo' ? entry.from : entry.to })
         break
       case 'create-edge':
         if (dir === 'undo') internalRemoveEdge(entry.edge.id)

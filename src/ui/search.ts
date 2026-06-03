@@ -1,4 +1,5 @@
-import type { Node } from '../types'
+import type { Node, NodeClass } from '../types'
+import { NODE_CLASS_FILLS, NODE_DEFAULT_FILL } from '../graph/utils'
 
 let _panel: HTMLElement | null = null
 let _clickOutside: ((e: MouseEvent) => void) | null = null
@@ -36,13 +37,14 @@ function statusDotColor(status: Node['status']): string {
   return '#6b7280'
 }
 
-function filterNodes(nodes: Node[], query: string): Node[] {
+function filterNodes(nodes: Node[], query: string, classFilter: NodeClass | ''): Node[] {
+  const pool = classFilter ? nodes.filter(n => n.nodeClass === classFilter) : nodes
   const q = query.trim().toLowerCase()
-  if (!q) return nodes
+  if (!q) return pool
   const cutoff = Math.max(1, Math.ceil(q.length * 0.4))
   const exact: Node[] = []
   const fuzzy: Array<{ node: Node; dist: number }> = []
-  for (const node of nodes) {
+  for (const node of pool) {
     const label = node.label.toLowerCase()
     if (label.includes(q)) {
       exact.push(node)
@@ -108,7 +110,7 @@ export function showSearchPanel(
 
   // Input
   const inputWrap = document.createElement('div')
-  inputWrap.style.cssText = 'padding:.5rem .75rem;flex-shrink:0;'
+  inputWrap.style.cssText = 'padding:.5rem .75rem .25rem;flex-shrink:0;'
   const input = document.createElement('input')
   input.type = 'text'
   input.placeholder = 'Search nodes…'
@@ -122,15 +124,42 @@ export function showSearchPanel(
   inputWrap.appendChild(input)
   panel.appendChild(inputWrap)
 
+  // Class filter
+  const filterWrap = document.createElement('div')
+  filterWrap.style.cssText = 'padding:.25rem .75rem .4rem;flex-shrink:0;'
+  const classSelect = document.createElement('select')
+  classSelect.style.cssText =
+    'background:#0d1117;border:1px solid #30363d;border-radius:var(--radius);' +
+    'padding:.3rem .5rem;color:#8b949e;font-size:.75rem;font-family:var(--font);' +
+    'width:100%;box-sizing:border-box;outline:none;cursor:pointer;transition:border-color .15s;'
+  classSelect.addEventListener('focus', () => { classSelect.style.borderColor = '#58a6ff' })
+  classSelect.addEventListener('blur', () => { classSelect.style.borderColor = '#30363d' })
+
+  const classFilterOptions: Array<{ value: NodeClass | ''; label: string }> = [
+    { value: '', label: 'All classes' },
+    { value: 'UI', label: 'UI' },
+    { value: 'Logic', label: 'Logic' },
+    { value: 'Graphics', label: 'Graphics' },
+    { value: 'Sound', label: 'Sound' },
+  ]
+  for (const opt of classFilterOptions) {
+    const o = document.createElement('option')
+    o.value = opt.value
+    o.textContent = opt.label
+    classSelect.appendChild(o)
+  }
+  filterWrap.appendChild(classSelect)
+  panel.appendChild(filterWrap)
+
   // Results
   const list = document.createElement('div')
   list.style.cssText = 'flex:1;overflow-y:auto;padding:.25rem .5rem .5rem;'
   panel.appendChild(list)
 
-  function renderResults(query: string): void {
+  function renderResults(query: string, classFilter: NodeClass | ''): void {
     list.innerHTML = ''
     const nodes = getNodes()
-    const results = filterNodes(nodes, query)
+    const results = filterNodes(nodes, query, classFilter)
 
     if (nodes.length > 0 && results.length === 0) {
       const empty = document.createElement('div')
@@ -156,9 +185,19 @@ export function showSearchPanel(
       const label = document.createElement('span')
       label.textContent = node.label
       label.style.cssText =
-        'color:#e6edf3;font-size:.8125rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+        'color:#e6edf3;font-size:.8125rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;'
 
       row.append(dot, label)
+
+      if (node.nodeClass) {
+        const classBadge = document.createElement('span')
+        classBadge.textContent = node.nodeClass
+        classBadge.style.cssText =
+          `font-size:.65rem;padding:.1rem .35rem;border-radius:3px;flex-shrink:0;` +
+          `background:${NODE_CLASS_FILLS[node.nodeClass] ?? NODE_DEFAULT_FILL};color:#c9d1d9;`
+        row.appendChild(classBadge)
+      }
+
       row.addEventListener('click', () => {
         hideSearchPanel()
         onSelect(node)
@@ -167,8 +206,9 @@ export function showSearchPanel(
     }
   }
 
-  input.addEventListener('input', () => renderResults(input.value))
-  renderResults('')
+  input.addEventListener('input', () => renderResults(input.value, classSelect.value as NodeClass | ''))
+  classSelect.addEventListener('change', () => renderResults(input.value, classSelect.value as NodeClass | ''))
+  renderResults('', '')
 
   document.body.appendChild(panel)
   requestAnimationFrame(() =>
