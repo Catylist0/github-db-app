@@ -84,7 +84,7 @@ export function addInteraction(
     const edgeById = new Map(graph.edges.map(e => [e.id, e]))
     for (const edge of graph.edges) {
       try {
-        const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing)
+        const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, obstaclesFor(edge.from, edge.to))
         segMap.set(edge.id, geo.segments)
       } catch { /* node may be mid-removal */ }
     }
@@ -211,7 +211,7 @@ export function addInteraction(
     if (!path) return
     const fromPos = getNodePos(edge.from)
     const toPos = getNodePos(edge.to)
-    const geo = computeEdgeGeometry(fromPos, toPos, edge.routing)
+    const geo = computeEdgeGeometry(fromPos, toPos, edge.routing, obstaclesFor(edge.from, edge.to))
     path.setAttribute('d', geo.d)
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
@@ -406,12 +406,24 @@ export function addInteraction(
     return { x: Number(g.dataset.cx), y: Number(g.dataset.cy), hh: Number(g.dataset.hh) || NODE_HH }
   }
 
+  // Nodes an elbow edge should try to route around — every node except the two
+  // it connects. Live positions are read from the DOM so this stays correct
+  // mid-drag.
+  function obstaclesFor(fromId: string, toId: string): Node[] {
+    return graph.nodes.filter(n => n.id !== fromId && n.id !== toId).map(n => {
+      const g = viewport.querySelector<SVGGElement>(`[data-node-id="${n.id}"]`)
+      return g ? { ...n, x: Number(g.dataset.cx), y: Number(g.dataset.cy) } : n
+    })
+  }
+
   function refreshEdgePath(path: SVGPathElement): void {
-    const from = getNodePos(path.dataset.from!)
-    const to = getNodePos(path.dataset.to!)
+    const fromId = path.dataset.from!
+    const toId = path.dataset.to!
+    const from = getNodePos(fromId)
+    const to = getNodePos(toId)
     const edgeId = path.dataset.edgeId
     const routing = (edgeId ? graph.edges.find(e => e.id === edgeId)?.routing : undefined) ?? 'straight'
-    const geo = computeEdgeGeometry(from, to, routing)
+    const geo = computeEdgeGeometry(from, to, routing, obstaclesFor(fromId, toId))
     path.setAttribute('d', geo.d)
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
@@ -459,7 +471,7 @@ export function addInteraction(
     const toEl = viewport.querySelector(`[data-node-id="${edge.to}"]`)
     if (!fromEl || !toEl) return
     graph.edges.push(edge)
-    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge)
+    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge, obstaclesFor(edge.from, edge.to))
     viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
     api.upsertEdge(edge).catch(console.error)
     rebuildAllVanish()

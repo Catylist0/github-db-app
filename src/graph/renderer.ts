@@ -54,7 +54,8 @@ export function renderGraph(
     const to = nodeMap.get(edge.to)!
     const fromPos = { x: from.x, y: from.y, hh: nodeHalfHeight(from.label) }
     const toPos = { x: to.x, y: to.y, hh: nodeHalfHeight(to.label) }
-    viewport.appendChild(makeEdgePath(fromPos, toPos, edge.from, edge.to, edge))
+    const obstacles = graph.nodes.filter(n => n.id !== edge.from && n.id !== edge.to)
+    viewport.appendChild(makeEdgePath(fromPos, toPos, edge.from, edge.to, edge, obstacles))
   }
 
   for (const node of graph.nodes) {

@@ -159,10 +159,82 @@ export interface EdgeGeometry {
   segments: Seg[]
 }
 
+type Pt = { x: number; y: number }
+type Elbow2Shape = { d: string; midX: number; midY: number; segments: Seg[] }
+
+// Clearance kept between a routed bend line and the node row/column it skirts.
+const ELBOW_GAP = 30
+
+function seg(a: Pt, b: Pt): Seg {
+  return { x1: a.x, y1: a.y, x2: b.x, y2: b.y }
+}
+
+// Horizontal-first two-joint elbow: exits/enters the left or right sides, with
+// the vertical run placed at x = bx.
+function elbow2Horizontal(fc: Pt, tc: Pt, fromHH: number, toHH: number, bx: number): Elbow2Shape {
+  const bend1 = { x: bx, y: fc.y }
+  const bend2 = { x: bx, y: tc.y }
+  const start = edgeEndpoint(bend1.x, bend1.y, fc.x, fc.y, fromHH)
+  const end = edgeEndpoint(bend2.x, bend2.y, tc.x, tc.y, toHH)
+  return {
+    d: `M ${start.x} ${start.y} L ${bend1.x} ${bend1.y} L ${bend2.x} ${bend2.y} L ${end.x} ${end.y}`,
+    midX: bx,
+    midY: (bend1.y + bend2.y) / 2,
+    segments: [seg(start, bend1), seg(bend1, bend2), seg(bend2, end)],
+  }
+}
+
+// Vertical-first two-joint elbow: exits/enters the top or bottom sides, with the
+// horizontal run placed at y = by.
+function elbow2Vertical(fc: Pt, tc: Pt, fromHH: number, toHH: number, by: number): Elbow2Shape {
+  const bend1 = { x: fc.x, y: by }
+  const bend2 = { x: tc.x, y: by }
+  const start = edgeEndpoint(bend1.x, bend1.y, fc.x, fc.y, fromHH)
+  const end = edgeEndpoint(bend2.x, bend2.y, tc.x, tc.y, toHH)
+  return {
+    d: `M ${start.x} ${start.y} L ${bend1.x} ${bend1.y} L ${bend2.x} ${bend2.y} L ${end.x} ${end.y}`,
+    midX: (bend1.x + bend2.x) / 2,
+    midY: by,
+    segments: [seg(start, bend1), seg(bend1, bend2), seg(bend2, end)],
+  }
+}
+
+// Length of the portion of a segment that lies inside the given box.
+function segBoxOverlap(s: Seg, rx: number, ry: number, rw: number, rh: number): number {
+  const hit = lineBoxIntersect(s.x1, s.y1, s.x2, s.y2, rx, ry, rw, rh)
+  if (!hit) return 0
+  return (hit.tOut - hit.tIn) * Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+}
+
+// Penalty score for an elbow2 candidate: crossing an unrelated node is heavily
+// penalised; running through the interior of the origin/destination node is a
+// lighter penalty (the path legitimately touches their borders at its ends, so
+// a slightly shrunk box is used to ignore that border contact).
+function elbow2Score(
+  shape: Elbow2Shape,
+  obstacles: Node[],
+  fromPos: { x: number; y: number; hh?: number },
+  toPos: { x: number; y: number; hh?: number },
+): number {
+  let score = 0
+  for (const s of shape.segments) {
+    for (const n of obstacles) {
+      const nhh = nodeHalfHeight(n.label)
+      if (segBoxOverlap(s, n.x - NODE_HW, n.y - nhh, NODE_HW * 2, nhh * 2) > 1) score += 100
+    }
+    for (const p of [fromPos, toPos]) {
+      const hh = (p.hh ?? NODE_HH) - 1
+      if (segBoxOverlap(s, p.x - NODE_HW + 1, p.y - hh, (NODE_HW - 1) * 2, hh * 2) > 2) score += 40
+    }
+  }
+  return score
+}
+
 export function computeEdgeGeometry(
   fromPos: { x: number; y: number; hh?: number },
   toPos: { x: number; y: number; hh?: number },
   routing: EdgeRouting = 'straight',
+  obstacles: Node[] = [],
 ): EdgeGeometry {
   const fc = fromPos
   const tc = toPos
@@ -189,21 +261,40 @@ export function computeEdgeGeometry(
   }
 
   if (routing === 'elbow2') {
-    const midX = (fc.x + tc.x) / 2
-    const bend1 = { x: midX, y: fc.y }
-    const bend2 = { x: midX, y: tc.y }
-    const start = edgeEndpoint(bend1.x, bend1.y, fc.x, fc.y, fromHH)
-    const end = edgeEndpoint(bend2.x, bend2.y, tc.x, tc.y, toHH)
-    return {
-      d: `M ${start.x} ${start.y} L ${bend1.x} ${bend1.y} L ${bend2.x} ${bend2.y} L ${end.x} ${end.y}`,
-      midX,
-      midY: (fc.y + tc.y) / 2,
-      segments: [
-        { x1: start.x, y1: start.y, x2: bend1.x, y2: bend1.y },
-        { x1: bend1.x, y1: bend1.y, x2: bend2.x, y2: bend2.y },
-        { x1: bend2.x, y1: bend2.y, x2: end.x, y2: end.y },
-      ],
+    // A two-joint (three-segment) orthogonal elbow is either horizontal-first
+    // (exits/enters left or right) or vertical-first (exits/enters top or
+    // bottom). For each orientation the bend line can sit *between* the nodes
+    // (an S/Z shape) or *outside* both of them (a C shape) — together these
+    // cover every combination of origin/destination sides. We default to the
+    // shape that matches the dominant axis, then, if it would cross another
+    // node (or run through the endpoints' interiors), fall back to whichever
+    // candidate has the lowest collision penalty.
+    const dx = tc.x - fc.x
+    const dy = tc.y - fc.y
+    const preferH = Math.abs(dx) >= Math.abs(dy)
+
+    const minX = Math.min(fc.x, tc.x), maxX = Math.max(fc.x, tc.x)
+    const rightBend = maxX + NODE_HW + ELBOW_GAP
+    const leftBend = minX - NODE_HW - ELBOW_GAP
+    const downBend = Math.max(fc.y + fromHH, tc.y + toHH) + ELBOW_GAP
+    const upBend = Math.min(fc.y - fromHH, tc.y - toHH) - ELBOW_GAP
+
+    const candidates: { shape: Elbow2Shape; pref: number }[] = [
+      { shape: elbow2Horizontal(fc, tc, fromHH, toHH, (fc.x + tc.x) / 2), pref: preferH ? 0 : 1 },
+      { shape: elbow2Vertical(fc, tc, fromHH, toHH, (fc.y + tc.y) / 2), pref: preferH ? 1 : 0 },
+      { shape: elbow2Horizontal(fc, tc, fromHH, toHH, rightBend), pref: preferH ? 2 : 4 },
+      { shape: elbow2Horizontal(fc, tc, fromHH, toHH, leftBend), pref: preferH ? 3 : 5 },
+      { shape: elbow2Vertical(fc, tc, fromHH, toHH, downBend), pref: preferH ? 4 : 2 },
+      { shape: elbow2Vertical(fc, tc, fromHH, toHH, upBend), pref: preferH ? 5 : 3 },
+    ]
+
+    let best = candidates[0]
+    let bestScore = elbow2Score(best.shape, obstacles, fromPos, toPos) + best.pref
+    for (const cand of candidates.slice(1)) {
+      const score = elbow2Score(cand.shape, obstacles, fromPos, toPos) + cand.pref
+      if (score < bestScore) { best = cand; bestScore = score }
     }
+    return best.shape
   }
 
   // straight
@@ -438,10 +529,11 @@ export function makeEdgePath(
   fromId: string,
   toId: string,
   edge?: Partial<Edge>,
+  obstacles: Node[] = [],
 ): SVGPathElement {
   const routing: EdgeRouting = edge?.routing ?? 'straight'
   const edgeId = edge?.id ?? `${fromId}-${toId}`
-  const geo = computeEdgeGeometry(fromPos, toPos, routing)
+  const geo = computeEdgeGeometry(fromPos, toPos, routing, obstacles)
 
   const path = svgEl('path')
   path.setAttribute('d', geo.d)
