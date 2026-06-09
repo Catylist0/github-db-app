@@ -148,8 +148,17 @@ async function runBackup(env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
+
+    // Enforce HTTPS — redirect any plaintext HTTP request to its https equivalent.
+    if (url.protocol !== 'https:') {
+      url.protocol = 'https:'
+      return Response.redirect(url.toString(), 301)
+    }
+
     const origin = request.headers.get('Origin') ?? ''
     const corsHeaders = cors(origin)
+    // Tell clients to only ever reach us over HTTPS going forward.
+    corsHeaders['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains; preload'
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders })

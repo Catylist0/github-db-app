@@ -7,7 +7,7 @@ export const NODE_CLASS_FILLS: Record<string, string> = {
   Logic:    '#4a1212',
   Graphics: '#2e1a52',
   Sound:    '#4a2e14',
-  Research: '#00f0ff',
+  Research: '#00c5e3',
 }
 export const NODE_DEFAULT_FILL = '#1f2937'
 
@@ -106,8 +106,10 @@ export function edgeEndpoint(fx: number, fy: number, tx: number, ty: number, hh:
 
 export function nodeIsReady(node: Node, edges: Edge[], nodeMap: Map<string, Node>): boolean {
   if (node.status !== 'planned') return false
+  // Only solid edges are hard dependencies. Dashed edges are soft links — the
+  // preceding node need not be complete before this one can be started.
   return edges
-    .filter(e => e.to === node.id)
+    .filter(e => e.to === node.id && e.style === 'solid')
     .every(e => nodeMap.get(e.from)?.status === 'complete')
 }
 
