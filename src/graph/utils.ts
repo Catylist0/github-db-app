@@ -399,7 +399,7 @@ const STACK_SPACING = 4
 const STACK_PROXIMITY = 6
 // Straighter single-segment lines snap to node sides while elbow buses run
 // further out — use a wider capture band when pulling them into a stack.
-const STACK_STRAIGHT_PROXIMITY = 24
+const STACK_STRAIGHT_PROXIMITY = 64
 // Min axial overlap before two parallel segments count as running "alongside".
 const STACK_MIN_OVERLAP = 8
 // Keep a stacked node-attachment point this far from the node's corners.
