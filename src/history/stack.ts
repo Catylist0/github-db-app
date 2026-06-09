@@ -6,6 +6,9 @@ export type MoveRecord = {
   to: { x: number; y: number }
 }
 
+// The mutable line settings of an edge (routing / style / vanish).
+export type EdgeSettingsPatch = Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>
+
 export type HistoryEntry =
   | { type: 'create-node'; node: Node }
   | { type: 'delete-node'; node: Node; edges: Edge[] }
@@ -16,6 +19,7 @@ export type HistoryEntry =
   | { type: 'class-node'; id: string; from: NodeClass | undefined; to: NodeClass | undefined }
   | { type: 'create-edge'; edge: Edge }
   | { type: 'delete-edge'; edge: Edge }
+  | { type: 'settings-edge'; id: string; from: EdgeSettingsPatch; to: EdgeSettingsPatch }
 
 const MAX = 100
 const undoStack: HistoryEntry[] = []

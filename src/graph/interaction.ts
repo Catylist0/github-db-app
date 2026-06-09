@@ -20,7 +20,7 @@ import {
 import { showPanel, hidePanel } from '../ui/panel'
 import { record, popUndo, pushRedo, popRedo, pushUndo, clearHistory } from '../history/stack'
 import { openEdgeDialog, closeEdgeDialog, isEdgeDialogOpen } from '../ui/edge-dialog'
-import type { HistoryEntry } from '../history/stack'
+import type { HistoryEntry, EdgeSettingsPatch } from '../history/stack'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
@@ -202,7 +202,10 @@ export function addInteraction(
     return g
   }
 
-  function applyEdgePatch(edge: Edge, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>): void {
+  // Apply a line-settings patch to an edge (mutate model, DOM and persist).
+  // Does not touch the undo history — callers that originate a user edit should
+  // use applyEdgePatch so the change is recorded.
+  function setEdgeSettings(edge: Edge, patch: EdgeSettingsPatch): void {
     Object.assign(edge, patch)
     const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
     if (!path) return
@@ -215,6 +218,22 @@ export function addInteraction(
     path.setAttribute('stroke-dasharray', edge.style === 'dashed' ? '6 4' : '')
     api.patchEdge(edge.id, patch).catch(console.error)
     rebuildAllVanish()
+  }
+
+  function applyEdgePatch(edge: Edge, patch: EdgeSettingsPatch): void {
+    // Capture only the fields that actually change, so undo/redo restores the
+    // exact prior settings (and a no-op edit is not recorded).
+    const before: EdgeSettingsPatch = {}
+    const after: EdgeSettingsPatch = {}
+    for (const key of Object.keys(patch) as (keyof EdgeSettingsPatch)[]) {
+      const next = patch[key]
+      if (next === undefined || edge[key] === next) continue
+      ;(before as Record<string, unknown>)[key] = edge[key]
+      ;(after as Record<string, unknown>)[key] = next
+    }
+    if (Object.keys(after).length === 0) return
+    record({ type: 'settings-edge', id: edge.id, from: before, to: after })
+    setEdgeSettings(edge, after)
   }
 
   function buildIconCluster(edge: Edge, midVpX: number, midVpY: number): SVGGElement {
@@ -739,6 +758,11 @@ export function addInteraction(
         if (dir === 'undo') internalAddEdge({ ...entry.edge })
         else internalRemoveEdge(entry.edge.id)
         break
+      case 'settings-edge': {
+        const edge = graph.edges.find(e => e.id === entry.id)
+        if (edge) setEdgeSettings(edge, dir === 'undo' ? entry.from : entry.to)
+        break
+      }
     }
     refreshHighlights()
   }
@@ -842,7 +866,7 @@ export function addInteraction(
       singleDragOrigin = { cx: Number(nodeG.dataset.cx), cy: Number(nodeG.dataset.cy) }
 
       const nodeId = nodeG.dataset.nodeId!
-      if (authenticated && me.shiftKey && selectedNodes.has(nodeId)) {
+      if (authenticated && selectedNodes.size > 1 && selectedNodes.has(nodeId)) {
         isMultiDrag = true
         multiDragOrigins.clear()
         for (const id of selectedNodes) {
