@@ -131,8 +131,13 @@ export function statusEdgeColor(status: NodeStatus): string {
 // Arrow markers attach at their centre so the stroke stops before the tip.
 export const ARROW_MARKER_WIDTH = 10
 export const ARROW_MARKER_REF = ARROW_MARKER_WIDTH / 2
+// Clearance between the arrow tip and the destination node border.
+export const ARROW_NODE_GAP = 6
+// Pull the rendered path end back from the node border by this much: half the
+// arrow (so the stroke meets the marker centre) plus the tip gap above.
+export const ARROW_PATH_INSET = ARROW_MARKER_REF + ARROW_NODE_GAP
 
-export function shortenLastSegment(segs: Seg[], amount = ARROW_MARKER_REF): Seg[] {
+export function shortenLastSegment(segs: Seg[], amount = ARROW_PATH_INSET): Seg[] {
   if (segs.length === 0) return segs
   const last = { ...segs[segs.length - 1] }
   const dx = last.x2 - last.x1
@@ -431,6 +436,94 @@ function orientOf(s: Seg): StackOrient {
   return Math.abs(s.y2 - s.y1) < 0.5 ? 'H' : 'V'
 }
 
+function isAxisAlignedSeg(s: Seg): boolean {
+  const adx = Math.abs(s.x2 - s.x1)
+  const ady = Math.abs(s.y2 - s.y1)
+  return Math.max(adx, ady) >= 1 && (ady < 0.5 || adx < 0.5)
+}
+
+function isStackableStraight(segs: Seg[], originalSegs: Seg[], routing: EdgeRouting): boolean {
+  if (routing !== 'straight' || segs.length !== 1) return false
+  // Snapped by straightenStraight, or already axis-aligned in router output.
+  return segs !== originalSegs || isAxisAlignedSeg(segs[0])
+}
+
+function canStackTogether(a: StackSegRec, b: StackSegRec): boolean {
+  if (a.orient !== b.orient) return false
+  if (Math.abs(a.perp - b.perp) > STACK_PROXIMITY) return false
+  const overlap = Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)
+  return overlap >= STACK_MIN_OVERLAP
+}
+
+// True when seg runs alongside the group's corridor (proximate + overlaps the
+// group's combined axial span, even if it barely touches any single member).
+function segNearGroup(seg: StackSegRec, group: StackSegRec[]): boolean {
+  if (group.length === 0 || seg.orient !== group[0].orient) return false
+  const perpDist = Math.min(...group.map(m => Math.abs(m.perp - seg.perp)))
+  if (perpDist > STACK_PROXIMITY) return false
+  const lo = Math.min(...group.map(m => m.lo))
+  const hi = Math.max(...group.map(m => m.hi))
+  const overlap = Math.min(seg.hi, hi) - Math.max(seg.lo, lo)
+  return overlap >= STACK_MIN_OVERLAP
+}
+
+function groupsCanMerge(a: StackSegRec[], b: StackSegRec[]): boolean {
+  for (const x of a) {
+    for (const y of b) {
+      if (canStackTogether(x, y)) return true
+    }
+  }
+  for (const x of a) {
+    if (segNearGroup(x, b)) return true
+  }
+  for (const x of b) {
+    if (segNearGroup(x, a)) return true
+  }
+  return false
+}
+
+function buildStacksFromPool(pool: StackSegRec[]): StackSegRec[][] {
+  const parent = pool.map((_, i) => i)
+  const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i] } return i }
+  const union = (a: number, b: number): void => { parent[find(a)] = find(b) }
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      if (canStackTogether(pool[i], pool[j])) union(i, j)
+    }
+  }
+  const grouped = new Map<number, StackSegRec[]>()
+  for (let i = 0; i < pool.length; i++) {
+    const r = find(i)
+    ;(grouped.get(r) ?? grouped.set(r, []).get(r)!).push(pool[i])
+  }
+  let groups = [...grouped.values()]
+
+  // Merge clusters when a segment sits near the combined corridor of another
+  // group (common for straightened straights running beside elbow stacks).
+  let changed = true
+  while (changed) {
+    changed = false
+    outer: for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        if (groupsCanMerge(groups[i], groups[j])) {
+          groups[i] = groups[i].concat(groups[j])
+          groups.splice(j, 1)
+          changed = true
+          break outer
+        }
+      }
+    }
+  }
+
+  const stacks: StackSegRec[][] = []
+  for (const members of groups) {
+    if (members.length >= 2) {
+      stacks.push(members.sort((a, b) => a.perp - b.perp || (a.edgeId < b.edgeId ? -1 : 1)))
+    }
+  }
+  return stacks
+}
+
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v))
 
 // A straight edge within STRAIGHTEN_MAX_ANGLE_DEG of horizontal or vertical —
@@ -558,8 +651,34 @@ function buildStackBundles(stacks: StackSegRec[][]): StackSegRec[][][] {
   return [...groups.values()]
 }
 
-function orderStackByEdges(stack: StackSegRec[], edgeOrder: string[]): StackSegRec[] {
-  const rank = new Map(edgeOrder.map((id, i) => [id, i]))
+// Signed turn at the corner after segment segIndex (screen coords: y grows down).
+// Negative ⇒ clockwise; positive ⇒ counter-clockwise.
+function cornerCrossZ(rec: StackEdgeRec, segIndex: number): number | null {
+  if (segIndex < 0 || segIndex + 2 >= rec.points.length) return null
+  if (rec.orients[segIndex] === rec.orients[segIndex + 1]) return null
+  const ax = rec.points[segIndex + 1].x - rec.points[segIndex].x
+  const ay = rec.points[segIndex + 1].y - rec.points[segIndex].y
+  const bx = rec.points[segIndex + 2].x - rec.points[segIndex + 1].x
+  const by = rec.points[segIndex + 2].y - rec.points[segIndex + 1].y
+  return ax * by - ay * bx
+}
+
+// At a corner the incoming parallel stack must flip its edge order relative to
+// the outgoing stack on clockwise turns (e.g. right-then-up), but keep it on
+// counter-clockwise turns (e.g. right-then-down).
+function stackOrderReversed(stack: StackSegRec[], recById: Map<string, StackEdgeRec>): boolean {
+  const m = stack[0]
+  const rec = recById.get(m.edgeId)
+  if (!rec) return false
+  const i = m.segIndex
+  if (i + 1 >= rec.orients.length || rec.orients[i] === rec.orients[i + 1]) return false
+  const cross = cornerCrossZ(rec, i)
+  return cross !== null && cross < 0
+}
+
+function orderStackByEdges(stack: StackSegRec[], edgeOrder: string[], reversed = false): StackSegRec[] {
+  const order = reversed ? [...edgeOrder].reverse() : edgeOrder
+  const rank = new Map(order.map((id, i) => [id, i]))
   return [...stack].sort((a, b) =>
     (rank.get(a.edgeId) ?? 0) - (rank.get(b.edgeId) ?? 0) || a.segIndex - b.segIndex,
   )
@@ -607,7 +726,9 @@ export function stackEdgeSegments(
       const straightened = straightenStraight(it.fromId, it.toId, nodePos)
       if (straightened) segs = straightened
     }
-    const stackable = segs.length >= 1 && (it.routing === 'elbow1' || it.routing === 'elbow2' || segs !== it.segments)
+    const stackable = segs.length >= 1 && (
+      it.routing === 'elbow1' || it.routing === 'elbow2' || isStackableStraight(segs, it.segments, it.routing)
+    )
 
     const points: Pt[] = segs.length
       ? [{ x: segs[0].x1, y: segs[0].y1 }, ...segs.map(s => ({ x: s.x2, y: s.y2 }))]
@@ -630,38 +751,15 @@ export function stackEdgeSegments(
     })
   }
 
-  // Group candidate segments into stacks via connected components: same
-  // orientation, perpendicular gap ≤ proximity, axial overlap ≥ minimum.
+  // Group parallel proximate segments into stacks (pairwise + corridor envelope).
   const stacks: StackSegRec[][] = []
   for (const orient of ['H', 'V'] as StackOrient[]) {
-    const pool = segRecs.filter(s => s.orient === orient)
-    const parent = pool.map((_, i) => i)
-    const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i] } return i }
-    const union = (a: number, b: number): void => { parent[find(a)] = find(b) }
-    for (let i = 0; i < pool.length; i++) {
-      for (let j = i + 1; j < pool.length; j++) {
-        const a = pool[i], b = pool[j]
-        if (Math.abs(a.perp - b.perp) > STACK_PROXIMITY) continue
-        const overlap = Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)
-        if (overlap >= STACK_MIN_OVERLAP) union(i, j)
-      }
-    }
-    const groups = new Map<number, StackSegRec[]>()
-    for (let i = 0; i < pool.length; i++) {
-      const r = find(i)
-      ;(groups.get(r) ?? groups.set(r, []).get(r)!).push(pool[i])
-    }
-    for (const members of groups.values()) {
-      // Seed order by perpendicular position (deterministic tiebreak).
-      if (members.length >= 2) {
-        stacks.push(members.sort((a, b) => a.perp - b.perp || (a.edgeId < b.edgeId ? -1 : 1)))
-      }
-    }
+    stacks.push(...buildStacksFromPool(segRecs.filter(s => s.orient === orient)))
   }
 
   // Lay out stacks bundle-by-bundle. Contiguous H/V stacks on the same edges
-  // share one edge ordering so corner joints stay uncrossed; each stack in the
-  // bundle is re-sorted to that order before offsets are assigned.
+  // share one edge ordering; clockwise corners reverse the incoming stack's
+  // application of that order so the ladder matches the turn geometry.
   const offsets = new Map<string, number>()
   for (const bundle of buildStackBundles(stacks)) {
     const edgeIds = [...new Set(bundle.flatMap(s => s.map(m => m.edgeId)))]
@@ -677,9 +775,15 @@ export function stackEdgeSegments(
     edgeIds.sort((a, b) => meanPerp(a) - meanPerp(b) || (a < b ? -1 : 1))
 
     const memberIds = new Set(edgeIds)
+    const layoutBundle = (order: string[], into: Map<string, number>): void => {
+      for (const stack of bundle) {
+        const reversed = stackOrderReversed(stack, recById)
+        assignStackOffsets(orderStackByEdges(stack, order, reversed), nodePos, into)
+      }
+    }
     const scoreOf = (order: string[]): number => {
       const tmp = new Map(offsets)
-      for (const stack of bundle) assignStackOffsets(orderStackByEdges(stack, order), nodePos, tmp)
+      layoutBundle(order, tmp)
       return countCrossings(memberIds, recById, tmp)
     }
 
@@ -696,7 +800,8 @@ export function stackEdgeSegments(
     }
 
     for (const stack of bundle) {
-      const ordered = orderStackByEdges(stack, edgeIds)
+      const reversed = stackOrderReversed(stack, recById)
+      const ordered = orderStackByEdges(stack, edgeIds, reversed)
       stack.length = 0
       stack.push(...ordered)
       assignStackOffsets(stack, nodePos, offsets)
