@@ -1,4 +1,4 @@
-import type { Node, Edge, EdgeRouting } from '../types'
+import type { Node, NodeStatus, Edge, EdgeRouting } from '../types'
 
 const NS = 'http://www.w3.org/2000/svg'
 
@@ -117,6 +117,15 @@ export function nodeBorderColor(node: Node, edges: Edge[], nodeMap: Map<string, 
   if (node.status === 'ongoing') return '#f97316'
   if (node.status === 'complete') return '#22c55e'
   return nodeIsReady(node, edges, nodeMap) ? '#e6edf3' : '#4b5563'
+}
+
+// Edges are colour-coded by the state of their origin node, so a glance shows
+// which work each dependency flows out of. One colour per state — readiness
+// (the white/grey split used for node borders) is intentionally ignored here.
+export function statusEdgeColor(status: NodeStatus): string {
+  if (status === 'ongoing') return '#f97316'
+  if (status === 'complete') return '#22c55e'
+  return '#4b5563'
 }
 
 export function setPulse(rect: SVGRectElement, active: boolean): void {
@@ -339,6 +348,8 @@ const STACK_PROXIMITY = 6
 const STACK_MIN_OVERLAP = 8
 // Keep a stacked node-attachment point this far from the node's corners.
 const STACK_NODE_MARGIN = 4
+const STRAIGHTEN_MAX_ANGLE_DEG = 5
+const STRAIGHTEN_MAX_ANGLE_TAN = Math.tan((STRAIGHTEN_MAX_ANGLE_DEG * Math.PI) / 180)
 
 export function segmentsToPath(segs: Seg[]): string {
   if (segs.length === 0) return ''
@@ -374,29 +385,32 @@ function orientOf(s: Seg): StackOrient {
 
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v))
 
-// A straight edge that is essentially axis-aligned — i.e. a fully horizontal or
-// vertical line would still land on both nodes' sides (their perpendicular
-// ranges overlap on the dominant axis) — is snapped to that axis and returned as
-// a single axis-aligned segment so it can join a stack. Genuinely diagonal edges
-// (no perpendicular overlap on the dominant axis) return null and stay straight.
+// A straight edge within STRAIGHTEN_MAX_ANGLE_DEG of horizontal or vertical —
+// and whose snapped axis-aligned form would still land on both nodes' sides
+// (their perpendicular ranges overlap) — is snapped to that axis and returned as
+// a single axis-aligned segment so it can join a stack. Steeper diagonals return
+// null and stay as drawn.
 function straightenStraight(fromId: string, toId: string, nodePos: NodePosFn): Seg[] | null {
   const f = nodePos(fromId)
   const t = nodePos(toId)
   const dx = t.x - f.x
   const dy = t.y - f.y
+  const adx = Math.abs(dx)
+  const ady = Math.abs(dy)
   const yLo = Math.max(f.y - f.hh, t.y - t.hh)
   const yHi = Math.min(f.y + f.hh, t.y + t.hh)
   const xLo = Math.max(f.x - NODE_HW, t.x - NODE_HW)
   const xHi = Math.min(f.x + NODE_HW, t.x + NODE_HW)
-  const preferH = Math.abs(dx) >= Math.abs(dy)
+  const nearHorizontal = adx > 1 && ady / adx <= STRAIGHTEN_MAX_ANGLE_TAN
+  const nearVertical = ady > 1 && adx / ady <= STRAIGHTEN_MAX_ANGLE_TAN
 
-  if (preferH && yLo <= yHi && Math.abs(dx) > 1) {
+  if (nearHorizontal && yLo <= yHi) {
     const y = clamp((f.y + t.y) / 2, yLo, yHi)
     const fromX = f.x + (dx > 0 ? NODE_HW : -NODE_HW)
     const toX = t.x + (dx > 0 ? -NODE_HW : NODE_HW)
     return [{ x1: fromX, y1: y, x2: toX, y2: y }]
   }
-  if (!preferH && xLo <= xHi && Math.abs(dy) > 1) {
+  if (nearVertical && xLo <= xHi) {
     const x = clamp((f.x + t.x) / 2, xLo, xHi)
     const fromY = f.y + (dy > 0 ? f.hh : -f.hh)
     const toY = t.y + (dy > 0 ? -t.hh : t.hh)
@@ -842,6 +856,7 @@ export function makeEdgePath(
   toId: string,
   edge?: Partial<Edge>,
   obstacles: Node[] = [],
+  fromStatus: NodeStatus = 'planned',
 ): SVGPathElement {
   const routing: EdgeRouting = edge?.routing ?? 'straight'
   const edgeId = edge?.id ?? `${fromId}-${toId}`
@@ -849,7 +864,7 @@ export function makeEdgePath(
 
   const path = svgEl('path')
   path.setAttribute('d', geo.d)
-  path.setAttribute('stroke', '#444')
+  path.setAttribute('stroke', statusEdgeColor(fromStatus))
   path.setAttribute('stroke-width', '2')
   path.setAttribute('fill', 'none')
   path.setAttribute('marker-end', 'url(#arrowhead)')

@@ -6,6 +6,7 @@ import {
   nodeBorderColor,
   nodeIsReady,
   nodeClassFill,
+  statusEdgeColor,
   nodeHalfHeight,
   setPulse,
   NODE_HH,
@@ -399,7 +400,10 @@ export function addInteraction(
     const hasSelection = selectedNodes.size > 0
     for (const path of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
       const hl = hasSelection && (selectedNodes.has(path.dataset.from!) || selectedNodes.has(path.dataset.to!))
-      path.setAttribute('stroke', hl ? '#e6edf3' : '#444')
+      // Default edges are colour-coded by the state of their origin node; a
+      // selection-highlighted edge brightens to white to stand out.
+      const fromStatus = nodeMap.get(path.dataset.from!)?.status ?? 'planned'
+      path.setAttribute('stroke', hl ? '#e6edf3' : statusEdgeColor(fromStatus))
       path.setAttribute('marker-end', hl ? 'url(#arrowhead-hl)' : 'url(#arrowhead)')
     }
 
@@ -489,7 +493,7 @@ export function addInteraction(
     const toEl = viewport.querySelector(`[data-node-id="${edge.to}"]`)
     if (!fromEl || !toEl) return
     graph.edges.push(edge)
-    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge, obstaclesFor(edge.from, edge.to))
+    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge, obstaclesFor(edge.from, edge.to), graph.nodes.find(n => n.id === edge.from)?.status)
     viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
     if (persist) api.upsertEdge(edge).catch(console.error)
     rebuildAllVanish()
@@ -570,7 +574,7 @@ export function addInteraction(
     } else {
       const edge: Edge = { id: `${fromId}-${toId}`, from: fromId, to: toId, routing: 'straight', style: 'solid', vanish: false }
       graph.edges.push(edge)
-      const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId, edge)
+      const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId, edge, [], graph.nodes.find(n => n.id === fromId)?.status)
       viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
       api.upsertEdge(edge).catch(console.error)
       record({ type: 'create-edge', edge: { ...edge } })
@@ -741,8 +745,8 @@ export function addInteraction(
     rebuildAllVanish()
   }
 
-  alignPanel.appendChild(makeAlignBtn('Align on vertical axis', () => performAlign('y')))
-  alignPanel.appendChild(makeAlignBtn('Align on horizontal axis', () => performAlign('x')))
+  alignPanel.appendChild(makeAlignBtn('Align along horizontal axis', () => performAlign('y')))
+  alignPanel.appendChild(makeAlignBtn('Align along vertical axis', () => performAlign('x')))
   alignPanel.appendChild(makeAlignBtn('Horizontal even spacing', () => performDistribute('x')))
   alignPanel.appendChild(makeAlignBtn('Vertical even spacing', () => performDistribute('y')))
 
