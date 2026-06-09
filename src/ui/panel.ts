@@ -243,6 +243,7 @@ export function showPanel(
     { value: 'Logic',    label: 'Logic',    color: NODE_CLASS_FILLS.Logic },
     { value: 'Graphics', label: 'Graphics', color: NODE_CLASS_FILLS.Graphics },
     { value: 'Sound',    label: 'Sound',    color: NODE_CLASS_FILLS.Sound },
+    { value: 'Research', label: 'Research', color: NODE_CLASS_FILLS.Research },
   ]
 
   const classWrap = document.createElement('div')

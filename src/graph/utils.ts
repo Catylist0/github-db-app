@@ -3,10 +3,11 @@ import type { Node, Edge, EdgeRouting } from '../types'
 const NS = 'http://www.w3.org/2000/svg'
 
 export const NODE_CLASS_FILLS: Record<string, string> = {
-  UI:       '#1a3d2b',
+  UI:       '#0b3d1f',
   Logic:    '#4a1212',
   Graphics: '#2e1a52',
   Sound:    '#4a2e14',
+  Research: '#7ab8e0',
 }
 export const NODE_DEFAULT_FILL = '#1f2937'
 
@@ -18,13 +19,78 @@ export function svgEl<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementT
   return document.createElementNS(NS, tag) as SVGElementTagNameMap[K]
 }
 
-const NODE_HW = 60
-const NODE_HH = 20
+export const NODE_HW = 60
+// Minimum / default half-height. Nodes grow taller than this when their label
+// wraps onto multiple lines (see nodeHeight).
+export const NODE_HH = 20
+
+// Text layout inside a node. Width is fixed; height grows to fit wrapped lines.
+const NODE_WIDTH = NODE_HW * 2
+const TEXT_PADDING_X = 10
+const MAX_TEXT_WIDTH = NODE_WIDTH - 2 * TEXT_PADDING_X
+const FONT_SIZE = 13
+const NODE_FONT = `${FONT_SIZE}px system-ui`
+const LINE_HEIGHT = 16
+const NODE_MIN_HEIGHT = NODE_HH * 2
+const NODE_VERT_PADDING = 12
+
+let _measureCtx: CanvasRenderingContext2D | null = null
+function measureText(s: string): number {
+  if (!_measureCtx) {
+    _measureCtx = document.createElement('canvas').getContext('2d')
+    if (_measureCtx) _measureCtx.font = NODE_FONT
+  }
+  // Fallback estimate if a 2d context is unavailable (e.g. headless).
+  return _measureCtx ? _measureCtx.measureText(s).width : s.length * FONT_SIZE * 0.6
+}
+
+// Hard-break a single word that is wider than the node on its own.
+function breakLongWord(word: string): string[] {
+  if (measureText(word) <= MAX_TEXT_WIDTH) return [word]
+  const parts: string[] = []
+  let cur = ''
+  for (const ch of word) {
+    if (!cur || measureText(cur + ch) <= MAX_TEXT_WIDTH) cur += ch
+    else { parts.push(cur); cur = ch }
+  }
+  if (cur) parts.push(cur)
+  return parts
+}
+
+// Split a label into lines that each fit within the node's inner width,
+// breaking on whitespace (and hard-breaking any single word that is too long).
+export function wrapLabel(label: string): string[] {
+  const words = label.split(/\s+/).filter(Boolean)
+  if (words.length === 0) return ['']
+  const lines: string[] = []
+  let cur = ''
+  for (const word of words) {
+    for (const piece of breakLongWord(word)) {
+      const test = cur ? `${cur} ${piece}` : piece
+      if (!cur || measureText(test) <= MAX_TEXT_WIDTH) {
+        cur = test
+      } else {
+        lines.push(cur)
+        cur = piece
+      }
+    }
+  }
+  if (cur) lines.push(cur)
+  return lines
+}
+
+export function nodeHeight(lineCount: number): number {
+  return Math.max(NODE_MIN_HEIGHT, lineCount * LINE_HEIGHT + NODE_VERT_PADDING)
+}
+
+export function nodeHalfHeight(label: string): number {
+  return nodeHeight(wrapLabel(label).length) / 2
+}
 
 export const NODE_STROKE_WIDTH = 1.5
 export const SELECTED_NODE_STROKE_WIDTH = NODE_STROKE_WIDTH * 2
 
-export function edgeEndpoint(fx: number, fy: number, tx: number, ty: number): { x: number; y: number } {
+export function edgeEndpoint(fx: number, fy: number, tx: number, ty: number, hh: number = NODE_HH): { x: number; y: number } {
   const dx = fx - tx
   const dy = fy - ty
   const len = Math.sqrt(dx * dx + dy * dy)
@@ -33,7 +99,7 @@ export function edgeEndpoint(fx: number, fy: number, tx: number, ty: number): { 
   const uy = dy / len
   const t = Math.min(
     Math.abs(ux) > 1e-9 ? NODE_HW / Math.abs(ux) : Infinity,
-    Math.abs(uy) > 1e-9 ? NODE_HH / Math.abs(uy) : Infinity,
+    Math.abs(uy) > 1e-9 ? hh / Math.abs(uy) : Infinity,
   )
   return { x: tx + t * ux, y: ty + t * uy }
 }
@@ -92,12 +158,14 @@ export interface EdgeGeometry {
 }
 
 export function computeEdgeGeometry(
-  fromPos: { x: number; y: number },
-  toPos: { x: number; y: number },
+  fromPos: { x: number; y: number; hh?: number },
+  toPos: { x: number; y: number; hh?: number },
   routing: EdgeRouting = 'straight',
 ): EdgeGeometry {
   const fc = fromPos
   const tc = toPos
+  const fromHH = fromPos.hh ?? NODE_HH
+  const toHH = toPos.hh ?? NODE_HH
 
   if (routing === 'elbow1') {
     const dx = tc.x - fc.x
@@ -105,8 +173,8 @@ export function computeEdgeGeometry(
     const bend = Math.abs(dx) >= Math.abs(dy)
       ? { x: tc.x, y: fc.y }
       : { x: fc.x, y: tc.y }
-    const start = edgeEndpoint(bend.x, bend.y, fc.x, fc.y)
-    const end = edgeEndpoint(bend.x, bend.y, tc.x, tc.y)
+    const start = edgeEndpoint(bend.x, bend.y, fc.x, fc.y, fromHH)
+    const end = edgeEndpoint(bend.x, bend.y, tc.x, tc.y, toHH)
     return {
       d: `M ${start.x} ${start.y} L ${bend.x} ${bend.y} L ${end.x} ${end.y}`,
       midX: bend.x,
@@ -122,8 +190,8 @@ export function computeEdgeGeometry(
     const midX = (fc.x + tc.x) / 2
     const bend1 = { x: midX, y: fc.y }
     const bend2 = { x: midX, y: tc.y }
-    const start = edgeEndpoint(bend1.x, bend1.y, fc.x, fc.y)
-    const end = edgeEndpoint(bend2.x, bend2.y, tc.x, tc.y)
+    const start = edgeEndpoint(bend1.x, bend1.y, fc.x, fc.y, fromHH)
+    const end = edgeEndpoint(bend2.x, bend2.y, tc.x, tc.y, toHH)
     return {
       d: `M ${start.x} ${start.y} L ${bend1.x} ${bend1.y} L ${bend2.x} ${bend2.y} L ${end.x} ${end.y}`,
       midX,
@@ -137,8 +205,8 @@ export function computeEdgeGeometry(
   }
 
   // straight
-  const start = edgeEndpoint(tc.x, tc.y, fc.x, fc.y)
-  const end = edgeEndpoint(fc.x, fc.y, tc.x, tc.y)
+  const start = edgeEndpoint(tc.x, tc.y, fc.x, fc.y, fromHH)
+  const end = edgeEndpoint(fc.x, fc.y, tc.x, tc.y, toHH)
   return {
     d: `M ${start.x} ${start.y} L ${end.x} ${end.y}`,
     midX: (start.x + end.x) / 2,
@@ -220,7 +288,8 @@ export function buildVanishMask(
     // Node bbox intersections
     for (const n of allNodes) {
       if (n.id === fromId || n.id === toId) continue
-      const hit = lineBoxIntersect(seg.x1, seg.y1, seg.x2, seg.y2, n.x - NODE_HW, n.y - NODE_HH, NODE_HW * 2, NODE_HH * 2)
+      const nhh = nodeHalfHeight(n.label)
+      const hit = lineBoxIntersect(seg.x1, seg.y1, seg.x2, seg.y2, n.x - NODE_HW, n.y - nhh, NODE_HW * 2, nhh * 2)
       if (hit) intervals.push(hit)
     }
 
@@ -362,8 +431,8 @@ export function cleanupVanishDefs(edgeId: string, defs: SVGDefsElement): void {
 // ── Edge path element ─────────────────────────────────────────────────────────
 
 export function makeEdgePath(
-  fromPos: { x: number; y: number },
-  toPos: { x: number; y: number },
+  fromPos: { x: number; y: number; hh?: number },
+  toPos: { x: number; y: number; hh?: number },
   fromId: string,
   toId: string,
   edge?: Partial<Edge>,
@@ -391,32 +460,43 @@ export function makeEdgePath(
 // ── Node element ──────────────────────────────────────────────────────────────
 
 export function makeNodeEl(node: Node, borderColor = '#4b5563', pulse = false): SVGGElement {
+  const lines = wrapLabel(node.label)
+  const height = nodeHeight(lines.length)
+  const halfHeight = height / 2
+
   const g = svgEl('g')
   g.dataset.nodeId = node.id
   g.dataset.cx = String(node.x)
   g.dataset.cy = String(node.y)
-  g.setAttribute('transform', `translate(${node.x - 60},${node.y - 20})`)
+  g.dataset.hh = String(halfHeight)
+  g.setAttribute('transform', `translate(${node.x - NODE_HW},${node.y - halfHeight})`)
   g.style.cursor = 'grab'
 
   const rect = svgEl('rect')
-  rect.setAttribute('width', '120')
-  rect.setAttribute('height', '40')
+  rect.setAttribute('width', String(NODE_WIDTH))
+  rect.setAttribute('height', String(height))
   rect.setAttribute('rx', '8')
   rect.setAttribute('fill', nodeClassFill(node.nodeClass))
   rect.setAttribute('stroke', borderColor)
   rect.setAttribute('stroke-width', String(NODE_STROKE_WIDTH))
 
   const text = svgEl('text')
-  text.setAttribute('x', '60')
-  text.setAttribute('y', '20')
   text.setAttribute('text-anchor', 'middle')
   text.setAttribute('dominant-baseline', 'middle')
   text.setAttribute('fill', '#e6edf3')
-  text.setAttribute('font-size', '13')
+  text.setAttribute('font-size', String(FONT_SIZE))
   text.setAttribute('font-family', 'system-ui')
   text.setAttribute('pointer-events', 'none')
   text.style.userSelect = 'none'
-  text.textContent = node.label
+
+  // Stack each wrapped line, centred vertically about the node's middle.
+  lines.forEach((line, i) => {
+    const tspan = svgEl('tspan')
+    tspan.setAttribute('x', String(NODE_HW))
+    tspan.setAttribute('y', String(halfHeight + (i - (lines.length - 1) / 2) * LINE_HEIGHT))
+    tspan.textContent = line
+    text.appendChild(tspan)
+  })
 
   if (pulse) setPulse(rect, true)
 

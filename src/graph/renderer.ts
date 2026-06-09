@@ -1,5 +1,5 @@
 import type { Graph, GraphAPI } from '../types'
-import { svgEl, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady } from './utils'
+import { svgEl, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady, nodeHalfHeight } from './utils'
 import { addInteraction } from './interaction'
 
 export function renderGraph(
@@ -52,7 +52,9 @@ export function renderGraph(
   for (const edge of graph.edges) {
     const from = nodeMap.get(edge.from)!
     const to = nodeMap.get(edge.to)!
-    viewport.appendChild(makeEdgePath(from, to, edge.from, edge.to, edge))
+    const fromPos = { x: from.x, y: from.y, hh: nodeHalfHeight(from.label) }
+    const toPos = { x: to.x, y: to.y, hh: nodeHalfHeight(to.label) }
+    viewport.appendChild(makeEdgePath(fromPos, toPos, edge.from, edge.to, edge))
   }
 
   for (const node of graph.nodes) {

@@ -1,5 +1,5 @@
 export type NodeStatus = 'planned' | 'ongoing' | 'complete'
-export type NodeClass = 'UI' | 'Logic' | 'Graphics' | 'Sound'
+export type NodeClass = 'UI' | 'Logic' | 'Graphics' | 'Sound' | 'Research'
 export type EdgeRouting = 'straight' | 'elbow1' | 'elbow2'
 export type EdgeStyle = 'solid' | 'dashed'
 

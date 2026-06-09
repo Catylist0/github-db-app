@@ -6,7 +6,9 @@ import {
   nodeBorderColor,
   nodeIsReady,
   nodeClassFill,
+  nodeHalfHeight,
   setPulse,
+  NODE_HH,
   NODE_STROKE_WIDTH,
   SELECTED_NODE_STROKE_WIDTH,
   computeEdgeGeometry,
@@ -380,9 +382,9 @@ export function addInteraction(
 
   // ── Edge helpers ───────────────────────────────────────────────────────────
 
-  function getNodePos(id: string): { x: number; y: number } {
+  function getNodePos(id: string): { x: number; y: number; hh: number } {
     const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
-    return { x: Number(g.dataset.cx), y: Number(g.dataset.cy) }
+    return { x: Number(g.dataset.cx), y: Number(g.dataset.cy), hh: Number(g.dataset.hh) || NODE_HH }
   }
 
   function refreshEdgePath(path: SVGPathElement): void {
@@ -462,12 +464,27 @@ export function addInteraction(
     node.y = pos.y
     const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
     if (g) {
+      const hh = Number(g.dataset.hh) || NODE_HH
       g.dataset.cx = String(pos.x)
       g.dataset.cy = String(pos.y)
-      g.setAttribute('transform', `translate(${pos.x - 60},${pos.y - 20})`)
+      g.setAttribute('transform', `translate(${pos.x - 60},${pos.y - hh})`)
       updateEdgesForNode(id)
     }
     api.upsertNode(node).catch(console.error)
+  }
+
+  // Rebuild a node's <g> in place so its height/wrapping reflects the current
+  // label, then refresh the edges that touch it. Selection styling is restored
+  // by the caller's refreshHighlights().
+  function rerenderNode(id: string): void {
+    const old = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
+    const node = graph.nodes.find(n => n.id === id)
+    if (!old || !node) return
+    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
+    const fresh = makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap))
+    old.replaceWith(fresh)
+    updateEdgesForNode(id)
+    rebuildAllVanish()
   }
 
   function internalUpdateNode(
@@ -478,8 +495,8 @@ export function addInteraction(
     if (!node) return
     Object.assign(node, patch)
     if (patch.label !== undefined) {
-      const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
-      if (textEl) textEl.textContent = patch.label
+      rerenderNode(id)
+      refreshHighlights()
     }
     if (patch.status !== undefined) refreshHighlights()
     if ('nodeClass' in patch) {
@@ -544,8 +561,8 @@ export function addInteraction(
           record({ type: 'class-node', id, from: node.nodeClass, to: updated.nodeClass })
         Object.assign(node, updated)
         if (updated.label !== undefined) {
-          const textEl = viewport.querySelector<SVGTextElement>(`[data-node-id="${id}"] text`)
-          if (textEl) textEl.textContent = updated.label
+          rerenderNode(id)
+          refreshHighlights()
         }
         if (updated.status !== undefined) refreshHighlights()
         if ('nodeClass' in updated) {
@@ -882,19 +899,21 @@ export function addInteraction(
         if (isMultiDrag) {
           for (const [id, origin] of multiDragOrigins) {
             const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
+            const hh = Number(g.dataset.hh) || NODE_HH
             const cx = origin.cx + dx / state.scale
             const cy = origin.cy + dy / state.scale
             g.dataset.cx = String(cx)
             g.dataset.cy = String(cy)
-            g.setAttribute('transform', `translate(${cx - 60},${cy - 20})`)
+            g.setAttribute('transform', `translate(${cx - 60},${cy - hh})`)
             updateEdgesForNode(id)
           }
         } else {
+          const hh = Number(activeNode.dataset.hh) || NODE_HH
           const cx = singleDragOrigin.cx + dx / state.scale
           const cy = singleDragOrigin.cy + dy / state.scale
           activeNode.dataset.cx = String(cx)
           activeNode.dataset.cy = String(cy)
-          activeNode.setAttribute('transform', `translate(${cx - 60},${cy - 20})`)
+          activeNode.setAttribute('transform', `translate(${cx - 60},${cy - hh})`)
           updateEdgesForNode(activeNode.dataset.nodeId!)
         }
       }
@@ -1024,12 +1043,29 @@ export function addInteraction(
     applyTransform()
   }, { passive: false })
 
-  // Initial centering + vanish masks
+  // Initial fit: position camera so the whole graph fits within the viewport
   if (graph.nodes.length > 0) {
     requestAnimationFrame(() => {
-      const cx = graph.nodes.reduce((s, n) => s + n.x, 0) / graph.nodes.length
-      const cy = graph.nodes.reduce((s, n) => s + n.y, 0) / graph.nodes.length
       const svgRect = svg.getBoundingClientRect()
+      // Bounding box of all nodes (120 wide, centered on x/y; height varies with label wrap)
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const n of graph.nodes) {
+        const hh = nodeHalfHeight(n.label)
+        minX = Math.min(minX, n.x - 60)
+        minY = Math.min(minY, n.y - hh)
+        maxX = Math.max(maxX, n.x + 60)
+        maxY = Math.max(maxY, n.y + hh)
+      }
+      const graphW = maxX - minX
+      const graphH = maxY - minY
+      const padding = 80
+      const availW = Math.max(1, svgRect.width - padding * 2)
+      const availH = Math.max(1, svgRect.height - padding * 2)
+      // Scale to fit, but never zoom in past 1:1
+      const fitScale = Math.min(availW / graphW, availH / graphH, 1)
+      state.scale = Math.max(0.1, fitScale)
+      const cx = (minX + maxX) / 2
+      const cy = (minY + maxY) / 2
       state.tx = svgRect.width / 2 - cx * state.scale
       state.ty = svgRect.height / 2 - cy * state.scale
       applyTransform()
