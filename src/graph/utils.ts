@@ -397,6 +397,9 @@ const STACK_SPACING = 4
 // Max perpendicular gap for two parallel segments to be treated as the same
 // stack (i.e. visually overlapping / crowded).
 const STACK_PROXIMITY = 6
+// Straighter single-segment lines snap to node sides while elbow buses run
+// further out — use a wider capture band when pulling them into a stack.
+const STACK_STRAIGHT_PROXIMITY = 24
 // Min axial overlap before two parallel segments count as running "alongside".
 const STACK_MIN_OVERLAP = 8
 // Keep a stacked node-attachment point this far from the node's corners.
@@ -430,6 +433,7 @@ interface StackSegRec {
   lo: number              // axial span start
   hi: number              // axial span end
   nodeIds: string[]       // node(s) this segment's endpoint(s) attach to (0–2)
+  straightSingle: boolean // axis-aligned / straightened routing === 'straight'
 }
 
 function orientOf(s: Seg): StackOrient {
@@ -448,9 +452,13 @@ function isStackableStraight(segs: Seg[], originalSegs: Seg[], routing: EdgeRout
   return segs !== originalSegs || isAxisAlignedSeg(segs[0])
 }
 
+function stackProximity(...segs: StackSegRec[]): number {
+  return segs.some(s => s.straightSingle) ? STACK_STRAIGHT_PROXIMITY : STACK_PROXIMITY
+}
+
 function canStackTogether(a: StackSegRec, b: StackSegRec): boolean {
   if (a.orient !== b.orient) return false
-  if (Math.abs(a.perp - b.perp) > STACK_PROXIMITY) return false
+  if (Math.abs(a.perp - b.perp) > stackProximity(a, b)) return false
   const overlap = Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)
   return overlap >= STACK_MIN_OVERLAP
 }
@@ -460,7 +468,7 @@ function canStackTogether(a: StackSegRec, b: StackSegRec): boolean {
 function segNearGroup(seg: StackSegRec, group: StackSegRec[]): boolean {
   if (group.length === 0 || seg.orient !== group[0].orient) return false
   const perpDist = Math.min(...group.map(m => Math.abs(m.perp - seg.perp)))
-  if (perpDist > STACK_PROXIMITY) return false
+  if (perpDist > stackProximity(seg, ...group)) return false
   const lo = Math.min(...group.map(m => m.lo))
   const hi = Math.max(...group.map(m => m.hi))
   const overlap = Math.min(seg.hi, hi) - Math.max(seg.lo, lo)
@@ -747,7 +755,8 @@ export function stackEdgeSegments(
       const nodeIds: string[] = []
       if (i === 0) nodeIds.push(it.fromId)
       if (i === segs.length - 1) nodeIds.push(it.toId)  // single segment ⇒ both
-      segRecs.push({ edgeId: it.id, segIndex: i, orient, perp, lo, hi, nodeIds })
+      const straightSingle = it.routing === 'straight' && segs.length === 1
+      segRecs.push({ edgeId: it.id, segIndex: i, orient, perp, lo, hi, nodeIds, straightSingle })
     })
   }
 
