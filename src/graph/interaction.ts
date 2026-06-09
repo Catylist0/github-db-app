@@ -7,6 +7,8 @@ import {
   nodeIsReady,
   nodeClassFill,
   statusEdgeColor,
+  edgeMarkerUrl,
+  displayPathFromSegments,
   nodeHalfHeight,
   setPulse,
   NODE_HH,
@@ -17,7 +19,6 @@ import {
   cleanupVanishDefs,
   segPathLength,
   stackEdgeSegments,
-  segmentsToPath,
   type Seg,
 } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
@@ -102,7 +103,7 @@ export function addInteraction(
       if (!edge) continue
       const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
       if (path) {
-        path.setAttribute('d', segmentsToPath(geo.segments))
+        path.setAttribute('d', displayPathFromSegments(geo.segments))
         path.dataset.midX = String(geo.midX)
         path.dataset.midY = String(geo.midY)
       }
@@ -231,7 +232,7 @@ export function addInteraction(
     const fromPos = getNodePos(edge.from)
     const toPos = getNodePos(edge.to)
     const geo = computeEdgeGeometry(fromPos, toPos, edge.routing, obstaclesFor(edge.from, edge.to))
-    path.setAttribute('d', geo.d)
+    path.setAttribute('d', displayPathFromSegments(geo.segments))
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
     path.setAttribute('stroke-dasharray', edge.style === 'dashed' ? '6 4' : '')
@@ -404,7 +405,7 @@ export function addInteraction(
       // selection-highlighted edge brightens to white to stand out.
       const fromStatus = nodeMap.get(path.dataset.from!)?.status ?? 'planned'
       path.setAttribute('stroke', hl ? '#e6edf3' : statusEdgeColor(fromStatus))
-      path.setAttribute('marker-end', hl ? 'url(#arrowhead-hl)' : 'url(#arrowhead)')
+      path.setAttribute('marker-end', edgeMarkerUrl(fromStatus, hl))
     }
 
     if (authenticated) updateIconClusters()
@@ -446,7 +447,7 @@ export function addInteraction(
     const edgeId = path.dataset.edgeId
     const routing = (edgeId ? graph.edges.find(e => e.id === edgeId)?.routing : undefined) ?? 'straight'
     const geo = computeEdgeGeometry(from, to, routing, obstaclesFor(fromId, toId))
-    path.setAttribute('d', geo.d)
+    path.setAttribute('d', displayPathFromSegments(geo.segments))
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
   }

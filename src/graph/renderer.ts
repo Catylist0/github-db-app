@@ -1,5 +1,5 @@
 import type { Graph, GraphAPI, GraphChanges } from '../types'
-import { svgEl, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady, nodeHalfHeight } from './utils'
+import { svgEl, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady, nodeHalfHeight, appendArrowheadMarkers } from './utils'
 import { addInteraction } from './interaction'
 
 export function renderGraph(
@@ -16,32 +16,7 @@ export function renderGraph(
   svg.style.display = 'block'
 
   const defs = svgEl('defs')
-
-  const marker = svgEl('marker')
-  marker.id = 'arrowhead'
-  marker.setAttribute('markerWidth', '10')
-  marker.setAttribute('markerHeight', '7')
-  marker.setAttribute('refX', '10')
-  marker.setAttribute('refY', '3.5')
-  marker.setAttribute('orient', 'auto')
-  const arrowPoly = svgEl('polygon')
-  arrowPoly.setAttribute('points', '0 0, 10 3.5, 0 7')
-  arrowPoly.setAttribute('fill', '#444')
-  marker.appendChild(arrowPoly)
-  defs.appendChild(marker)
-
-  const markerHl = svgEl('marker')
-  markerHl.id = 'arrowhead-hl'
-  markerHl.setAttribute('markerWidth', '10')
-  markerHl.setAttribute('markerHeight', '7')
-  markerHl.setAttribute('refX', '10')
-  markerHl.setAttribute('refY', '3.5')
-  markerHl.setAttribute('orient', 'auto')
-  const arrowPolyHl = svgEl('polygon')
-  arrowPolyHl.setAttribute('points', '0 0, 10 3.5, 0 7')
-  arrowPolyHl.setAttribute('fill', '#e6edf3')
-  markerHl.appendChild(arrowPolyHl)
-  defs.appendChild(markerHl)
+  appendArrowheadMarkers(defs)
   svg.appendChild(defs)
 
   const viewport = svgEl('g')

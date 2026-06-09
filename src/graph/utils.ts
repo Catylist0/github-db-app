@@ -128,6 +128,54 @@ export function statusEdgeColor(status: NodeStatus): string {
   return '#4b5563'
 }
 
+// Arrow markers attach at their centre so the stroke stops before the tip.
+export const ARROW_MARKER_WIDTH = 10
+export const ARROW_MARKER_REF = ARROW_MARKER_WIDTH / 2
+
+export function shortenLastSegment(segs: Seg[], amount = ARROW_MARKER_REF): Seg[] {
+  if (segs.length === 0) return segs
+  const last = { ...segs[segs.length - 1] }
+  const dx = last.x2 - last.x1
+  const dy = last.y2 - last.y1
+  const len = Math.hypot(dx, dy)
+  if (len <= amount) return segs
+  const f = (len - amount) / len
+  last.x2 = last.x1 + dx * f
+  last.y2 = last.y1 + dy * f
+  return [...segs.slice(0, -1), last]
+}
+
+export function displayPathFromSegments(segs: Seg[]): string {
+  return segmentsToPath(shortenLastSegment(segs))
+}
+
+export function edgeMarkerUrl(status: NodeStatus, highlight = false): string {
+  return highlight ? 'url(#arrowhead-hl)' : `url(#arrowhead-${status})`
+}
+
+export function appendArrowheadMarkers(defs: SVGDefsElement): void {
+  const specs: { id: string; fill: string }[] = [
+    { id: 'arrowhead-planned', fill: statusEdgeColor('planned') },
+    { id: 'arrowhead-ongoing', fill: statusEdgeColor('ongoing') },
+    { id: 'arrowhead-complete', fill: statusEdgeColor('complete') },
+    { id: 'arrowhead-hl', fill: '#e6edf3' },
+  ]
+  for (const { id, fill } of specs) {
+    const marker = svgEl('marker')
+    marker.id = id
+    marker.setAttribute('markerWidth', String(ARROW_MARKER_WIDTH))
+    marker.setAttribute('markerHeight', '7')
+    marker.setAttribute('refX', String(ARROW_MARKER_REF))
+    marker.setAttribute('refY', '3.5')
+    marker.setAttribute('orient', 'auto')
+    const poly = svgEl('polygon')
+    poly.setAttribute('points', '0 0, 10 3.5, 0 7')
+    poly.setAttribute('fill', fill)
+    marker.appendChild(poly)
+    defs.appendChild(marker)
+  }
+}
+
 export function setPulse(rect: SVGRectElement, active: boolean): void {
   const existing = rect.querySelector('animate[data-role="pulse"]')
   if (active && !existing) {
@@ -487,6 +535,36 @@ function countCrossings(memberIds: Set<string>, recById: Map<string, StackEdgeRe
   return n
 }
 
+// Stacks that share any edge belong to the same bundle (e.g. horizontal run
+// feeding into a vertical run on the same elbow edges). They must be ordered
+// with a single edge permutation or corner joints cross.
+function buildStackBundles(stacks: StackSegRec[][]): StackSegRec[][][] {
+  const n = stacks.length
+  if (n === 0) return []
+  const parent = stacks.map((_, i) => i)
+  const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i] } return i }
+  const union = (a: number, b: number): void => { parent[find(a)] = find(b) }
+  for (let i = 0; i < n; i++) {
+    const ids = new Set(stacks[i].map(m => m.edgeId))
+    for (let j = i + 1; j < n; j++) {
+      if (stacks[j].some(m => ids.has(m.edgeId))) union(i, j)
+    }
+  }
+  const groups = new Map<number, StackSegRec[][]>()
+  for (let i = 0; i < n; i++) {
+    const r = find(i)
+    ;(groups.get(r) ?? groups.set(r, []).get(r)!).push(stacks[i])
+  }
+  return [...groups.values()]
+}
+
+function orderStackByEdges(stack: StackSegRec[], edgeOrder: string[]): StackSegRec[] {
+  const rank = new Map(edgeOrder.map((id, i) => [id, i]))
+  return [...stack].sort((a, b) =>
+    (rank.get(a.edgeId) ?? 0) - (rank.get(b.edgeId) ?? 0) || a.segIndex - b.segIndex,
+  )
+}
+
 // Build the offset map for one ordered stack: members are laid onto an evenly
 // spaced ladder centred on their mean perpendicular position. Spacing is reduced
 // when the ladder would otherwise overflow the tightest node edge it attaches to.
@@ -581,36 +659,48 @@ export function stackEdgeSegments(
     }
   }
 
-  // Lay out the stacks by coordinate descent: each stack is ordered against the
-  // current offsets of all the others (re-evaluated over full polylines), and we
-  // repeat until nothing improves. This lets a horizontal stack feeding into a
-  // vertical one settle on a mutually crossing-free ordering.
+  // Lay out stacks bundle-by-bundle. Contiguous H/V stacks on the same edges
+  // share one edge ordering so corner joints stay uncrossed; each stack in the
+  // bundle is re-sorted to that order before offsets are assigned.
   const offsets = new Map<string, number>()
-  for (const stack of stacks) assignStackOffsets(stack, nodePos, offsets)
-
-  for (let pass = 0; pass < 4; pass++) {
-    let changed = false
-    for (const stack of stacks) {
-      const memberIds = new Set(stack.map(m => m.edgeId))
-      const scoreOf = (order: StackSegRec[]): number => {
-        const tmp = new Map(offsets)
-        assignStackOffsets(order, nodePos, tmp)
-        return countCrossings(memberIds, recById, tmp)
-      }
-      let best = scoreOf(stack)
-      let improved = true
-      while (improved && best > 0) {
-        improved = false
-        for (let i = 0; i < stack.length - 1; i++) {
-          ;[stack[i], stack[i + 1]] = [stack[i + 1], stack[i]]
-          const s = scoreOf(stack)
-          if (s < best) { best = s; improved = true; changed = true }
-          else { [stack[i], stack[i + 1]] = [stack[i + 1], stack[i]] }  // revert
+  for (const bundle of buildStackBundles(stacks)) {
+    const edgeIds = [...new Set(bundle.flatMap(s => s.map(m => m.edgeId)))]
+    const meanPerp = (id: string): number => {
+      let sum = 0, count = 0
+      for (const stack of bundle) {
+        for (const m of stack) {
+          if (m.edgeId === id) { sum += m.perp; count++ }
         }
       }
-      assignStackOffsets(stack, nodePos, offsets)  // commit to global context
+      return count ? sum / count : 0
     }
-    if (!changed) break
+    edgeIds.sort((a, b) => meanPerp(a) - meanPerp(b) || (a < b ? -1 : 1))
+
+    const memberIds = new Set(edgeIds)
+    const scoreOf = (order: string[]): number => {
+      const tmp = new Map(offsets)
+      for (const stack of bundle) assignStackOffsets(orderStackByEdges(stack, order), nodePos, tmp)
+      return countCrossings(memberIds, recById, tmp)
+    }
+
+    let best = scoreOf(edgeIds)
+    let improved = true
+    while (improved && best > 0) {
+      improved = false
+      for (let i = 0; i < edgeIds.length - 1; i++) {
+        ;[edgeIds[i], edgeIds[i + 1]] = [edgeIds[i + 1], edgeIds[i]]
+        const s = scoreOf(edgeIds)
+        if (s < best) { best = s; improved = true }
+        else { [edgeIds[i], edgeIds[i + 1]] = [edgeIds[i + 1], edgeIds[i]] }
+      }
+    }
+
+    for (const stack of bundle) {
+      const ordered = orderStackByEdges(stack, edgeIds)
+      stack.length = 0
+      stack.push(...ordered)
+      assignStackOffsets(stack, nodePos, offsets)
+    }
   }
 
   // Reconstruct every edge from the accumulated offsets (straight / unstacked
@@ -863,11 +953,11 @@ export function makeEdgePath(
   const geo = computeEdgeGeometry(fromPos, toPos, routing, obstacles)
 
   const path = svgEl('path')
-  path.setAttribute('d', geo.d)
+  path.setAttribute('d', displayPathFromSegments(geo.segments))
   path.setAttribute('stroke', statusEdgeColor(fromStatus))
   path.setAttribute('stroke-width', '2')
   path.setAttribute('fill', 'none')
-  path.setAttribute('marker-end', 'url(#arrowhead)')
+  path.setAttribute('marker-end', edgeMarkerUrl(fromStatus))
   if (edge?.style === 'dashed') path.setAttribute('stroke-dasharray', '6 4')
   path.dataset.from = fromId
   path.dataset.to = toId
