@@ -168,8 +168,32 @@ async function handleOAuthCallback(): Promise<void> {
 // We only pull rows newer than our known revision, and apply them as a diff;
 // _rev is advanced only when the diff is actually applied (the apply defers while
 // the user is mid-drag), so a deferred tick simply retries next time.
+// The timer resets on every local write so we don't poll right after persisting.
 
-const REFRESH_INTERVAL_MS = 5000
+const REFRESH_INTERVAL_MS = 3000
+let _pollTimer: ReturnType<typeof window.setTimeout> | undefined
+
+function resetPollTimer(): void {
+  if (_pollTimer !== undefined) window.clearTimeout(_pollTimer)
+  _pollTimer = window.setTimeout(() => {
+    void pollChanges().finally(resetPollTimer)
+  }, REFRESH_INTERVAL_MS)
+}
+
+function wrapWrite<T extends (...args: never[]) => Promise<void>>(fn: T): T {
+  return (async (...args: Parameters<T>) => {
+    resetPollTimer()
+    await fn(...args)
+  }) as T
+}
+
+const graphApi = {
+  upsertNode: wrapWrite(upsertNode),
+  deleteNode: wrapWrite(deleteNode),
+  upsertEdge: wrapWrite(upsertEdge),
+  deleteEdge: wrapWrite(deleteEdge),
+  patchEdge: wrapWrite(patchEdge),
+}
 
 async function pollChanges(): Promise<void> {
   if (_polling || !_controls || document.hidden) return
@@ -249,14 +273,14 @@ async function init(): Promise<void> {
     _graph = graph
     _rev = rev
     app.style.cssText = ''
-    _controls = renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge }, {
+    _controls = renderGraph(graph, app, graphApi, {
       onFocusNode: (nodeId) => {
         _selectedNodeId = nodeId
         updateAuditPanelSelection(nodeId)
       },
     })
     await handleOAuthCallback()
-    window.setInterval(() => { void pollChanges() }, REFRESH_INTERVAL_MS)
+    resetPollTimer()
   } catch (err) {
     app.style.cssText = 'display:flex;align-items:center;justify-content:center;'
     app.innerHTML = `<p style="color:#e6edf3;font-family:system-ui">
