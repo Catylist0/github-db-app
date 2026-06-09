@@ -160,7 +160,7 @@ export interface EdgeGeometry {
 }
 
 type Pt = { x: number; y: number }
-type Elbow2Shape = { d: string; midX: number; midY: number; segments: Seg[] }
+type ElbowShape = { d: string; midX: number; midY: number; segments: Seg[] }
 
 // Clearance kept between a routed bend line and the node row/column it skirts.
 const ELBOW_GAP = 30
@@ -169,9 +169,21 @@ function seg(a: Pt, b: Pt): Seg {
   return { x1: a.x, y1: a.y, x2: b.x, y2: b.y }
 }
 
+// Single-joint (two-segment) L-shaped elbow bending at the given corner.
+function elbow1Shape(fc: Pt, tc: Pt, fromHH: number, toHH: number, bend: Pt): ElbowShape {
+  const start = edgeEndpoint(bend.x, bend.y, fc.x, fc.y, fromHH)
+  const end = edgeEndpoint(bend.x, bend.y, tc.x, tc.y, toHH)
+  return {
+    d: `M ${start.x} ${start.y} L ${bend.x} ${bend.y} L ${end.x} ${end.y}`,
+    midX: bend.x,
+    midY: bend.y,
+    segments: [seg(start, bend), seg(bend, end)],
+  }
+}
+
 // Horizontal-first two-joint elbow: exits/enters the left or right sides, with
 // the vertical run placed at x = bx.
-function elbow2Horizontal(fc: Pt, tc: Pt, fromHH: number, toHH: number, bx: number): Elbow2Shape {
+function elbow2Horizontal(fc: Pt, tc: Pt, fromHH: number, toHH: number, bx: number): ElbowShape {
   const bend1 = { x: bx, y: fc.y }
   const bend2 = { x: bx, y: tc.y }
   const start = edgeEndpoint(bend1.x, bend1.y, fc.x, fc.y, fromHH)
@@ -186,7 +198,7 @@ function elbow2Horizontal(fc: Pt, tc: Pt, fromHH: number, toHH: number, bx: numb
 
 // Vertical-first two-joint elbow: exits/enters the top or bottom sides, with the
 // horizontal run placed at y = by.
-function elbow2Vertical(fc: Pt, tc: Pt, fromHH: number, toHH: number, by: number): Elbow2Shape {
+function elbow2Vertical(fc: Pt, tc: Pt, fromHH: number, toHH: number, by: number): ElbowShape {
   const bend1 = { x: fc.x, y: by }
   const bend2 = { x: tc.x, y: by }
   const start = edgeEndpoint(bend1.x, bend1.y, fc.x, fc.y, fromHH)
@@ -206,12 +218,12 @@ function segBoxOverlap(s: Seg, rx: number, ry: number, rw: number, rh: number): 
   return (hit.tOut - hit.tIn) * Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
 }
 
-// Penalty score for an elbow2 candidate: crossing an unrelated node is heavily
+// Penalty score for an elbow candidate: crossing an unrelated node is heavily
 // penalised; running through the interior of the origin/destination node is a
 // lighter penalty (the path legitimately touches their borders at its ends, so
 // a slightly shrunk box is used to ignore that border contact).
-function elbow2Score(
-  shape: Elbow2Shape,
+function elbowScore(
+  shape: ElbowShape,
   obstacles: Node[],
   fromPos: { x: number; y: number; hh?: number },
   toPos: { x: number; y: number; hh?: number },
@@ -230,6 +242,24 @@ function elbow2Score(
   return score
 }
 
+// Pick the candidate with the lowest collision penalty. The per-candidate `pref`
+// (a small bias < any real collision cost) decides ties so the natural shape
+// wins when nothing is in the way.
+function pickElbow(
+  candidates: { shape: ElbowShape; pref: number }[],
+  obstacles: Node[],
+  fromPos: { x: number; y: number; hh?: number },
+  toPos: { x: number; y: number; hh?: number },
+): ElbowShape {
+  let best = candidates[0]
+  let bestScore = elbowScore(best.shape, obstacles, fromPos, toPos) + best.pref
+  for (const cand of candidates.slice(1)) {
+    const score = elbowScore(cand.shape, obstacles, fromPos, toPos) + cand.pref
+    if (score < bestScore) { best = cand; bestScore = score }
+  }
+  return best.shape
+}
+
 export function computeEdgeGeometry(
   fromPos: { x: number; y: number; hh?: number },
   toPos: { x: number; y: number; hh?: number },
@@ -242,22 +272,19 @@ export function computeEdgeGeometry(
   const toHH = toPos.hh ?? NODE_HH
 
   if (routing === 'elbow1') {
+    // A single-joint L-shape has exactly two forms: bend at (tc.x, fc.y) —
+    // horizontal-first, exiting left/right of the origin — or bend at
+    // (fc.x, tc.y) — vertical-first, exiting top/bottom. Default to the one
+    // matching the dominant axis, but switch if it would cross another node
+    // (or pass through the endpoints' interiors).
     const dx = tc.x - fc.x
     const dy = tc.y - fc.y
-    const bend = Math.abs(dx) >= Math.abs(dy)
-      ? { x: tc.x, y: fc.y }
-      : { x: fc.x, y: tc.y }
-    const start = edgeEndpoint(bend.x, bend.y, fc.x, fc.y, fromHH)
-    const end = edgeEndpoint(bend.x, bend.y, tc.x, tc.y, toHH)
-    return {
-      d: `M ${start.x} ${start.y} L ${bend.x} ${bend.y} L ${end.x} ${end.y}`,
-      midX: bend.x,
-      midY: bend.y,
-      segments: [
-        { x1: start.x, y1: start.y, x2: bend.x, y2: bend.y },
-        { x1: bend.x, y1: bend.y, x2: end.x, y2: end.y },
-      ],
-    }
+    const preferH = Math.abs(dx) >= Math.abs(dy)
+    const shape = pickElbow([
+      { shape: elbow1Shape(fc, tc, fromHH, toHH, { x: tc.x, y: fc.y }), pref: preferH ? 0 : 1 },
+      { shape: elbow1Shape(fc, tc, fromHH, toHH, { x: fc.x, y: tc.y }), pref: preferH ? 1 : 0 },
+    ], obstacles, fromPos, toPos)
+    return shape
   }
 
   if (routing === 'elbow2') {
@@ -279,22 +306,14 @@ export function computeEdgeGeometry(
     const downBend = Math.max(fc.y + fromHH, tc.y + toHH) + ELBOW_GAP
     const upBend = Math.min(fc.y - fromHH, tc.y - toHH) - ELBOW_GAP
 
-    const candidates: { shape: Elbow2Shape; pref: number }[] = [
+    return pickElbow([
       { shape: elbow2Horizontal(fc, tc, fromHH, toHH, (fc.x + tc.x) / 2), pref: preferH ? 0 : 1 },
       { shape: elbow2Vertical(fc, tc, fromHH, toHH, (fc.y + tc.y) / 2), pref: preferH ? 1 : 0 },
       { shape: elbow2Horizontal(fc, tc, fromHH, toHH, rightBend), pref: preferH ? 2 : 4 },
       { shape: elbow2Horizontal(fc, tc, fromHH, toHH, leftBend), pref: preferH ? 3 : 5 },
       { shape: elbow2Vertical(fc, tc, fromHH, toHH, downBend), pref: preferH ? 4 : 2 },
       { shape: elbow2Vertical(fc, tc, fromHH, toHH, upBend), pref: preferH ? 5 : 3 },
-    ]
-
-    let best = candidates[0]
-    let bestScore = elbow2Score(best.shape, obstacles, fromPos, toPos) + best.pref
-    for (const cand of candidates.slice(1)) {
-      const score = elbow2Score(cand.shape, obstacles, fromPos, toPos) + cand.pref
-      if (score < bestScore) { best = cand; bestScore = score }
-    }
-    return best.shape
+    ], obstacles, fromPos, toPos)
   }
 
   // straight

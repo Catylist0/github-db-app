@@ -682,12 +682,41 @@ export function addInteraction(
     if (selectedNodes.size < 2) return
     const ids = [...selectedNodes]
     const nodes = ids.map(id => graph.nodes.find(n => n.id === id)).filter((n): n is Node => !!n)
-    const avg = Math.round(nodes.reduce((s, n) => s + n[axis], 0) / nodes.length)
+    const sorted = nodes.map(n => n[axis]).sort((a, b) => a - b)
+    const mid = sorted.length >> 1
+    const median = Math.round(
+      sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2,
+    )
     const moves = nodes.map(n => ({
       id: n.id,
       from: { x: n.x, y: n.y },
-      to: { x: axis === 'x' ? avg : n.x, y: axis === 'y' ? avg : n.y },
+      to: { x: axis === 'x' ? median : n.x, y: axis === 'y' ? median : n.y },
     }))
+    for (const m of moves) internalMoveNode(m.id, m.to)
+    record({ type: 'move-nodes', moves })
+    rebuildAllVanish()
+  }
+
+  // Distribute the selected nodes so their spacing along `axis` is perfectly
+  // even. Nodes are ordered by their position on that axis and the two extremes
+  // are pinned, so only the in-between nodes shift. The off-axis coordinate of
+  // each node is left untouched.
+  function performDistribute(axis: 'x' | 'y'): void {
+    if (selectedNodes.size < 3) return
+    const ids = [...selectedNodes]
+    const nodes = ids.map(id => graph.nodes.find(n => n.id === id)).filter((n): n is Node => !!n)
+    if (nodes.length < 3) return
+    const sorted = [...nodes].sort((a, b) => a[axis] - b[axis])
+    const min = sorted[0][axis]
+    const max = sorted[sorted.length - 1][axis]
+    const step = (max - min) / (sorted.length - 1)
+    const moves = sorted.flatMap((n, i) => {
+      const target = Math.round(min + step * i)
+      const to = { x: axis === 'x' ? target : n.x, y: axis === 'y' ? target : n.y }
+      if (to.x === n.x && to.y === n.y) return []
+      return [{ id: n.id, from: { x: n.x, y: n.y }, to }]
+    })
+    if (moves.length === 0) return
     for (const m of moves) internalMoveNode(m.id, m.to)
     record({ type: 'move-nodes', moves })
     rebuildAllVanish()
@@ -695,6 +724,8 @@ export function addInteraction(
 
   alignPanel.appendChild(makeAlignBtn('Align horizontal', () => performAlign('y')))
   alignPanel.appendChild(makeAlignBtn('Align vertical', () => performAlign('x')))
+  alignPanel.appendChild(makeAlignBtn('Horizontal even spacing', () => performDistribute('x')))
+  alignPanel.appendChild(makeAlignBtn('Vertical even spacing', () => performDistribute('y')))
 
   let pendingAddPos: { x: number; y: number } | null = null
   let pendingAddClientStart = { x: 0, y: 0 }
