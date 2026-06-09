@@ -59,6 +59,29 @@ async function validateToken(token) {
   return { ok: isMember, reason: isMember ? null : 'not_org_member', username }
 }
 
+// ── Revision tracking ─────────────────────────────────────────────────────────
+// A single monotonic counter (meta.rev) is bumped on every write. Each node/edge
+// row is stamped with the counter value at write time, and deletions are recorded
+// in `tombstones`. Clients poll GET /changes?since=<rev> to pull only the rows and
+// deletions newer than what they already have. The bump + row-stamp always happen
+// inside one D1 batch (a transaction), so the counter is never visible ahead of the
+// rows it stamps — a reader can't observe a gap and skip a change.
+
+// Subquery yielding the current revision; valid inside the same batch as a bump.
+const REV = "(SELECT value FROM meta WHERE key='rev')"
+
+function bump(db) {
+  return db.prepare("UPDATE meta SET value = value + 1 WHERE key = 'rev'")
+}
+
+function tombstone(db, type, id) {
+  return db.prepare(`INSERT OR REPLACE INTO tombstones (entity_type, entity_id, rev) VALUES (?, ?, ${REV})`).bind(type, id)
+}
+
+function clearTombstone(db, type, id) {
+  return db.prepare('DELETE FROM tombstones WHERE entity_type=? AND entity_id=?').bind(type, id)
+}
+
 async function initSchema(db) {
   await db.batch([
     db.prepare('CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL)'),
@@ -72,6 +95,13 @@ async function initSchema(db) {
       entity_id TEXT NOT NULL,
       diff TEXT NOT NULL
     )`),
+    db.prepare('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)'),
+    db.prepare(`CREATE TABLE IF NOT EXISTS tombstones (
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      rev INTEGER NOT NULL,
+      PRIMARY KEY (entity_type, entity_id)
+    )`),
   ])
   try { await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run() } catch { /* exists */ }
   try { await db.prepare("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'planned'").run() } catch { /* exists */ }
@@ -79,6 +109,14 @@ async function initSchema(db) {
   try { await db.prepare("ALTER TABLE edges ADD COLUMN routing TEXT NOT NULL DEFAULT 'straight'").run() } catch { /* exists */ }
   try { await db.prepare("ALTER TABLE edges ADD COLUMN style TEXT NOT NULL DEFAULT 'solid'").run() } catch { /* exists */ }
   try { await db.prepare('ALTER TABLE edges ADD COLUMN vanish INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
+  try { await db.prepare('ALTER TABLE nodes ADD COLUMN rev INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
+  try { await db.prepare('ALTER TABLE edges ADD COLUMN rev INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('rev', 0)"),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_nodes_rev ON nodes(rev)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_edges_rev ON edges(rev)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_tombstones_rev ON tombstones(rev)'),
+  ])
 }
 
 function auditRetentionCutoff() {
@@ -183,10 +221,12 @@ export default {
 
     // ── Public: GET /graph ────────────────────────────────────────────────────
     if (request.method === 'GET' && url.pathname === '/graph') {
-      const [nr, er] = await env.DB.batch([
+      const [nr, er, mr] = await env.DB.batch([
         env.DB.prepare('SELECT * FROM nodes'),
         env.DB.prepare('SELECT * FROM edges'),
+        env.DB.prepare("SELECT value FROM meta WHERE key='rev'"),
       ])
+      const rev = mr.results[0]?.value ?? 0
       if (nr.results.length === 0) {
         await env.DB.batch([
           ...SEED_NODES.map(n =>
@@ -198,9 +238,26 @@ export default {
               .bind(e.id, e.source, e.target, e.routing, e.style, e.vanish)
           ),
         ])
-        return json({ nodes: SEED_NODES, edges: SEED_EDGES }, 200, corsHeaders)
+        // Seed rows keep rev 0, matching the counter, so a /changes?since=0 poll
+        // correctly reports nothing new until the first real edit.
+        return json({ nodes: SEED_NODES, edges: SEED_EDGES, rev }, 200, corsHeaders)
       }
-      return json({ nodes: nr.results, edges: er.results }, 200, corsHeaders)
+      return json({ nodes: nr.results, edges: er.results, rev }, 200, corsHeaders)
+    }
+
+    // ── Public: GET /changes?since=<rev> ──────────────────────────────────────
+    // Returns only the nodes/edges written, and entities deleted, since the
+    // client's last known revision. since=0 (or omitted) returns the full graph.
+    if (request.method === 'GET' && url.pathname === '/changes') {
+      const since = Math.max(0, parseInt(url.searchParams.get('since') ?? '0', 10) || 0)
+      const [nr, er, tr, mr] = await env.DB.batch([
+        env.DB.prepare('SELECT * FROM nodes WHERE rev > ?').bind(since),
+        env.DB.prepare('SELECT * FROM edges WHERE rev > ?').bind(since),
+        env.DB.prepare('SELECT entity_type, entity_id, rev FROM tombstones WHERE rev > ?').bind(since),
+        env.DB.prepare("SELECT value FROM meta WHERE key='rev'"),
+      ])
+      const rev = mr.results[0]?.value ?? 0
+      return json({ rev, nodes: nr.results, edges: er.results, deletions: tr.results }, 200, corsHeaders)
     }
 
     // ── Auth middleware ───────────────────────────────────────────────────────
@@ -244,11 +301,15 @@ export default {
     // POST /nodes
     if (request.method === 'POST' && path === '/nodes') {
       const { id, label, x, y, description, status } = await request.json()
-      await env.DB.prepare('INSERT INTO nodes (id,label,x,y,description,status) VALUES (?,?,?,?,?,?)')
-        .bind(id, label, x, y, description ?? null, status ?? 'planned').run()
       const after = { id, label, x, y, description: description ?? null, status: status ?? 'planned' }
-      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
-        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_node', 'node', id, JSON.stringify({ before: null, after })).run()
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare(`INSERT INTO nodes (id,label,x,y,description,status,rev) VALUES (?,?,?,?,?,?,${REV})`)
+          .bind(id, label, x, y, description ?? null, status ?? 'planned'),
+        clearTombstone(env.DB, 'node', id),
+        env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+          .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_node', 'node', id, JSON.stringify({ before: null, after })),
+      ])
       return json({ ok: true }, 201, corsHeaders)
     }
 
@@ -257,8 +318,12 @@ export default {
       const id = decodeURIComponent(segments[1])
       const before = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
       const { label, x, y, description, status, node_class } = await request.json()
-      await env.DB.prepare('INSERT OR REPLACE INTO nodes (id,label,x,y,description,status,node_class) VALUES (?,?,?,?,?,?,?)')
-        .bind(id, label, x, y, description ?? null, status ?? 'planned', node_class ?? null).run()
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare(`INSERT OR REPLACE INTO nodes (id,label,x,y,description,status,node_class,rev) VALUES (?,?,?,?,?,?,?,${REV})`)
+          .bind(id, label, x, y, description ?? null, status ?? 'planned', node_class ?? null),
+        clearTombstone(env.DB, 'node', id),
+      ])
       const after = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
       await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
         .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'update_node', 'node', id, JSON.stringify({ before, after })).run()
@@ -270,12 +335,13 @@ export default {
       const id = decodeURIComponent(segments[1])
       const before = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
       const cascadedEdges = (await env.DB.prepare('SELECT * FROM edges WHERE source=? OR target=?').bind(id, id).all()).results
-      await env.DB.batch([
-        env.DB.prepare('DELETE FROM edges WHERE source=? OR target=?').bind(id, id),
-        env.DB.prepare('DELETE FROM nodes WHERE id=?').bind(id),
-      ])
       const now = new Date().toISOString()
       await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare('DELETE FROM edges WHERE source=? OR target=?').bind(id, id),
+        env.DB.prepare('DELETE FROM nodes WHERE id=?').bind(id),
+        ...cascadedEdges.map(edge => tombstone(env.DB, 'edge', edge.id)),
+        tombstone(env.DB, 'node', id),
         ...cascadedEdges.map(edge =>
           env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
             .bind(crypto.randomUUID(), now, auth.username, 'delete_edge', 'edge', edge.id, JSON.stringify({ before: edge, after: null }))
@@ -290,11 +356,15 @@ export default {
     if (request.method === 'POST' && path === '/edges') {
       const { id, source, target, routing, style, vanish } = await request.json()
       const r = routing ?? 'straight', s = style ?? 'solid', v = vanish ? 1 : 0
-      await env.DB.prepare('INSERT OR IGNORE INTO edges (id,source,target,routing,style,vanish) VALUES (?,?,?,?,?,?)')
-        .bind(id, source, target, r, s, v).run()
       const after = { id, source, target, routing: r, style: s, vanish: v }
-      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
-        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_edge', 'edge', id, JSON.stringify({ before: null, after })).run()
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare(`INSERT OR IGNORE INTO edges (id,source,target,routing,style,vanish,rev) VALUES (?,?,?,?,?,?,${REV})`)
+          .bind(id, source, target, r, s, v),
+        clearTombstone(env.DB, 'edge', id),
+        env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+          .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_edge', 'edge', id, JSON.stringify({ before: null, after })),
+      ])
       return json({ ok: true }, 201, corsHeaders)
     }
 
@@ -306,7 +376,10 @@ export default {
       const r = routing ?? before?.routing ?? 'straight'
       const s = style ?? before?.style ?? 'solid'
       const v = vanish !== undefined ? (vanish ? 1 : 0) : (before?.vanish ?? 0)
-      await env.DB.prepare('UPDATE edges SET routing=?, style=?, vanish=? WHERE id=?').bind(r, s, v, id).run()
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare(`UPDATE edges SET routing=?, style=?, vanish=?, rev=${REV} WHERE id=?`).bind(r, s, v, id),
+      ])
       const after = (await env.DB.prepare('SELECT * FROM edges WHERE id=?').bind(id).first()) ?? null
       await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
         .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'update_edge', 'edge', id, JSON.stringify({ before, after })).run()
@@ -317,9 +390,13 @@ export default {
     if (request.method === 'DELETE' && segments[0] === 'edges' && segments[1]) {
       const id = decodeURIComponent(segments[1])
       const before = (await env.DB.prepare('SELECT * FROM edges WHERE id=?').bind(id).first()) ?? null
-      await env.DB.prepare('DELETE FROM edges WHERE id=?').bind(id).run()
-      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
-        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'delete_edge', 'edge', id, JSON.stringify({ before, after: null })).run()
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare('DELETE FROM edges WHERE id=?').bind(id),
+        tombstone(env.DB, 'edge', id),
+        env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+          .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'delete_edge', 'edge', id, JSON.stringify({ before, after: null })),
+      ])
       return json({ ok: true }, 200, corsHeaders)
     }
 

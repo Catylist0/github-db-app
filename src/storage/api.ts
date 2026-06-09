@@ -1,6 +1,24 @@
 import { getToken } from '../auth/github'
 import { WORKER_URL } from '../config'
-import type { Graph, Node, Edge, EdgeRouting, EdgeStyle, AuditPage } from '../types'
+import type { Graph, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle, AuditPage } from '../types'
+
+type NodeRow = Omit<Node, 'nodeClass'> & { node_class?: string | null }
+type EdgeRow = { id: string; source: string; target: string; routing?: string; style?: string; vanish?: number }
+
+function mapNode(n: NodeRow): Node {
+  return { ...n, nodeClass: (n.node_class ?? undefined) as Node['nodeClass'] }
+}
+
+function mapEdge(e: EdgeRow): Edge {
+  return {
+    id: e.id,
+    from: e.source,
+    to: e.target,
+    routing: (e.routing ?? 'straight') as EdgeRouting,
+    style: (e.style ?? 'solid') as EdgeStyle,
+    vanish: Boolean(e.vanish),
+  }
+}
 
 let _onUnauthorized: ((reason: string) => void) | null = null
 export function onUnauthorized(fn: (reason: string) => void): void {
@@ -30,26 +48,43 @@ async function apiFetch(path: string, init?: RequestInit): Promise<unknown> {
   return res.json()
 }
 
-// Public — no auth token required
-export async function loadGraph(): Promise<Graph> {
+// Public — no auth token required. `rev` is the server revision this snapshot
+// reflects; pass it to fetchChanges() to pull only later updates.
+export async function loadGraph(): Promise<{ graph: Graph; rev: number }> {
   const res = await fetch(`${WORKER_URL}/graph`)
   if (!res.ok) {
     const body = await res.text().catch(() => '')
     throw new Error(`GET /graph: ${res.status}${body ? ` — ${body}` : ''}`)
   }
+  const data = await res.json() as { nodes: NodeRow[]; edges: EdgeRow[]; rev?: number }
+  return {
+    graph: { nodes: data.nodes.map(mapNode), edges: data.edges.map(mapEdge) },
+    rev: data.rev ?? 0,
+  }
+}
+
+// Public — pull rows written / entities deleted since `since`. since=0 returns
+// the full graph as a diff against an empty client.
+export async function fetchChanges(since: number): Promise<GraphChanges> {
+  const res = await fetch(`${WORKER_URL}/changes?since=${since}`)
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`GET /changes: ${res.status}${body ? ` — ${body}` : ''}`)
+  }
   const data = await res.json() as {
-    nodes: Array<Omit<Node, 'nodeClass'> & { node_class?: string | null }>
-    edges: Array<{ id: string; source: string; target: string; routing?: string; style?: string; vanish?: number }>
+    rev: number
+    nodes: NodeRow[]
+    edges: EdgeRow[]
+    deletions: Array<{ entity_type: string; entity_id: string; rev: number }>
   }
   return {
-    nodes: data.nodes.map(n => ({ ...n, nodeClass: (n.node_class ?? undefined) as Node['nodeClass'] })),
-    edges: data.edges.map(e => ({
-      id: e.id,
-      from: e.source,
-      to: e.target,
-      routing: (e.routing ?? 'straight') as EdgeRouting,
-      style: (e.style ?? 'solid') as EdgeStyle,
-      vanish: Boolean(e.vanish),
+    rev: data.rev,
+    nodes: data.nodes.map(mapNode),
+    edges: data.edges.map(mapEdge),
+    deletions: data.deletions.map(d => ({
+      entityType: d.entity_type as 'node' | 'edge',
+      entityId: d.entity_id,
+      rev: d.rev,
     })),
   }
 }

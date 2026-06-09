@@ -27,6 +27,15 @@ export interface Graph {
   edges: Edge[]
 }
 
+// Incremental update pulled from GET /changes — only the rows that were written
+// and the entities that were deleted since the client's last known revision.
+export interface GraphChanges {
+  rev: number
+  nodes: Node[]
+  edges: Edge[]
+  deletions: Array<{ entityType: 'node' | 'edge'; entityId: string; rev: number }>
+}
+
 export interface GraphAPI {
   upsertNode: (node: Node) => Promise<void>
   deleteNode: (id: string) => Promise<void>

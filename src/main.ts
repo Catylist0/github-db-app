@@ -1,16 +1,18 @@
 import { storeToken, getToken, login, logout, isAuthenticated } from './auth/github'
-import { loadGraph, upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge, onUnauthorized } from './storage/api'
+import { loadGraph, fetchChanges, upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge, onUnauthorized } from './storage/api'
 import { renderGraph } from './graph/renderer'
 import { hidePanel } from './ui/panel'
 import { hideSearchPanel, toggleSearchPanel, isSearchPanelOpen } from './ui/search'
 import { hideAuditPanel, toggleAuditPanel, isAuditPanelOpen, updateAuditPanelSelection } from './ui/audit'
-import type { Graph } from './types'
+import type { Graph, GraphChanges } from './types'
 
-let _controls: { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } | null = null
+let _controls: { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void; applyRemoteChanges: (changes: GraphChanges) => boolean } | null = null
 let _username: string | null = null
 let _authBar: HTMLElement | null = null
 let _graph: Graph | null = null
 let _selectedNodeId: string | null = null
+let _rev = 0
+let _polling = false
 
 // ── Error banner ──────────────────────────────────────────────────────────────
 
@@ -161,6 +163,28 @@ async function handleOAuthCallback(): Promise<void> {
   }
 }
 
+// ── Live refresh ────────────────────────────────────────────────────────────────
+// Poll the worker for changes so concurrent edits by other users surface here.
+// We only pull rows newer than our known revision, and apply them as a diff;
+// _rev is advanced only when the diff is actually applied (the apply defers while
+// the user is mid-drag), so a deferred tick simply retries next time.
+
+const REFRESH_INTERVAL_MS = 5000
+
+async function pollChanges(): Promise<void> {
+  if (_polling || !_controls || document.hidden) return
+  _polling = true
+  try {
+    const changes = await fetchChanges(_rev)
+    if (changes.rev === _rev) return
+    if (_controls.applyRemoteChanges(changes)) _rev = changes.rev
+  } catch (err) {
+    console.error('refresh failed', err)
+  } finally {
+    _polling = false
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init(): Promise<void> {
@@ -221,8 +245,9 @@ async function init(): Promise<void> {
   app.innerHTML = '<p style="padding:1rem;color:#e6edf3;font-family:system-ui">Loading…</p>'
 
   try {
-    const graph = await loadGraph()
+    const { graph, rev } = await loadGraph()
     _graph = graph
+    _rev = rev
     app.style.cssText = ''
     _controls = renderGraph(graph, app, { upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge }, {
       onFocusNode: (nodeId) => {
@@ -231,6 +256,7 @@ async function init(): Promise<void> {
       },
     })
     await handleOAuthCallback()
+    window.setInterval(() => { void pollChanges() }, REFRESH_INTERVAL_MS)
   } catch (err) {
     app.style.cssText = 'display:flex;align-items:center;justify-content:center;'
     app.innerHTML = `<p style="color:#e6edf3;font-family:system-ui">

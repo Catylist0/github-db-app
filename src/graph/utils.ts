@@ -327,6 +327,236 @@ export function computeEdgeGeometry(
   }
 }
 
+// ── Parallel-line stacking ─────────────────────────────────────────────────────
+
+// Centre-to-centre distance between neighbouring lines in a stack: the 2px
+// stroke plus ~2px of clear gap ("one line-width" of separation).
+const STACK_SPACING = 4
+// Max perpendicular gap for two parallel segments to be treated as the same
+// stack (i.e. visually overlapping / crowded).
+const STACK_PROXIMITY = 6
+// Min axial overlap before two parallel segments count as running "alongside".
+const STACK_MIN_OVERLAP = 8
+// Keep a stacked node-attachment point this far from the node's corners.
+const STACK_NODE_MARGIN = 4
+
+export function segmentsToPath(segs: Seg[]): string {
+  if (segs.length === 0) return ''
+  let d = `M ${segs[0].x1} ${segs[0].y1}`
+  for (const s of segs) d += ` L ${s.x2} ${s.y2}`
+  return d
+}
+
+type StackOrient = 'H' | 'V'
+
+interface StackEdgeRec {
+  id: string
+  fromId: string
+  toId: string
+  points: Pt[]            // length k+1
+  orients: StackOrient[]  // length k, alternating
+  stackable: boolean      // false for straight / degenerate edges (pass through)
+}
+
+interface StackSegRec {
+  edgeId: string
+  segIndex: number
+  orient: StackOrient
+  perp: number            // shared coord: y for H, x for V
+  lo: number              // axial span start
+  hi: number              // axial span end
+  nodeId: string | null   // node this segment's endpoint attaches to, if any
+}
+
+function orientOf(s: Seg): StackOrient {
+  return Math.abs(s.y2 - s.y1) < 0.5 ? 'H' : 'V'
+}
+
+// Reconstruct an edge's points after applying perpendicular offsets to its
+// segments. A horizontal segment's offset shifts y; a vertical segment's offset
+// shifts x. Each point is shifted by the offsets of the (≤2) segments incident
+// to it; because both ends of a segment receive the same shift, segments stay
+// axis-aligned and the polyline stays connected.
+function reconstructPoints(rec: StackEdgeRec, offsets: Map<string, number>): Pt[] {
+  const k = rec.orients.length
+  const out: Pt[] = []
+  for (let p = 0; p <= k; p++) {
+    let dx = 0, dy = 0
+    const apply = (si: number): void => {
+      const off = offsets.get(`${rec.id}#${si}`)
+      if (off === undefined) return
+      if (rec.orients[si] === 'H') dy += off
+      else dx += off
+    }
+    if (p > 0) apply(p - 1)
+    if (p < k) apply(p)
+    out.push({ x: rec.points[p].x + dx, y: rec.points[p].y + dy })
+  }
+  return out
+}
+
+function pointsToSegs(pts: Pt[]): Seg[] {
+  const segs: Seg[] = []
+  for (let i = 0; i < pts.length - 1; i++) {
+    segs.push({ x1: pts[i].x, y1: pts[i].y, x2: pts[i + 1].x, y2: pts[i + 1].y })
+  }
+  return segs
+}
+
+// Count intersections between the reconstructed polylines of the given members
+// under a candidate offset map. Parallel stacked segments never intersect; this
+// measures whether their connectors cross.
+function countStackCrossings(members: StackSegRec[], recById: Map<string, StackEdgeRec>, offsets: Map<string, number>): number {
+  const polylines = members.map(m => pointsToSegs(reconstructPoints(recById.get(m.edgeId)!, offsets)))
+  let n = 0
+  for (let i = 0; i < polylines.length; i++) {
+    for (let j = i + 1; j < polylines.length; j++) {
+      for (const a of polylines[i]) {
+        for (const b of polylines[j]) {
+          if (segIntersectT(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2) !== null) n++
+        }
+      }
+    }
+  }
+  return n
+}
+
+// Build the offset map for one ordered stack: members are laid onto an evenly
+// spaced ladder centred on their mean perpendicular position. Spacing is reduced
+// when the ladder would otherwise overflow a crowded node's edge.
+function assignStackOffsets(
+  order: StackSegRec[],
+  nodePos: (id: string) => { x: number; y: number; hh: number },
+  into: Map<string, number>,
+): void {
+  const n = order.length
+  const mean = order.reduce((s, m) => s + m.perp, 0) / n
+
+  // Tightest node-edge capacity among node-attached members limits the ladder.
+  let availableSpan = Infinity
+  for (const m of order) {
+    if (!m.nodeId) continue
+    const np = nodePos(m.nodeId)
+    const limit = m.orient === 'H' ? np.hh - STACK_NODE_MARGIN : NODE_HW - STACK_NODE_MARGIN
+    availableSpan = Math.min(availableSpan, 2 * limit)
+  }
+  const spacing = n > 1 ? Math.min(STACK_SPACING, availableSpan / (n - 1)) : 0
+
+  order.forEach((m, i) => {
+    const target = mean + (i - (n - 1) / 2) * spacing
+    let offset = target - m.perp
+    // Safety net: keep a node-attached endpoint on the node's edge.
+    if (m.nodeId) {
+      const np = nodePos(m.nodeId)
+      const center = m.orient === 'H' ? np.y : np.x
+      const limit = (m.orient === 'H' ? np.hh : NODE_HW) - STACK_NODE_MARGIN
+      const finalPerp = Math.max(center - limit, Math.min(center + limit, m.perp + offset))
+      offset = finalPerp - m.perp
+    }
+    into.set(`${m.edgeId}#${m.segIndex}`, offset)
+  })
+}
+
+// Spread overlapping parallel elbow segments into evenly spaced stacks, ordered
+// to minimise crossings between the edges' continuations. Runs after the router
+// has chosen each elbow's shape; straight edges pass through unchanged.
+export function stackEdgeSegments(
+  items: { id: string; fromId: string; toId: string; routing: EdgeRouting; segments: Seg[] }[],
+  nodePos: (id: string) => { x: number; y: number; hh: number },
+): Map<string, { segments: Seg[]; midX: number; midY: number }> {
+  const recById = new Map<string, StackEdgeRec>()
+  const segRecs: StackSegRec[] = []
+
+  for (const it of items) {
+    const segs = it.segments
+    const points: Pt[] = segs.length
+      ? [{ x: segs[0].x1, y: segs[0].y1 }, ...segs.map(s => ({ x: s.x2, y: s.y2 }))]
+      : []
+    const orients = segs.map(orientOf)
+    const stackable = (it.routing === 'elbow1' || it.routing === 'elbow2') && segs.length >= 2
+    recById.set(it.id, { id: it.id, fromId: it.fromId, toId: it.toId, points, orients, stackable })
+    if (!stackable) continue
+
+    segs.forEach((s, i) => {
+      const orient = orients[i]
+      const len = orient === 'H' ? Math.abs(s.x2 - s.x1) : Math.abs(s.y2 - s.y1)
+      if (len < 1) return
+      const perp = orient === 'H' ? s.y1 : s.x1
+      const lo = orient === 'H' ? Math.min(s.x1, s.x2) : Math.min(s.y1, s.y2)
+      const hi = orient === 'H' ? Math.max(s.x1, s.x2) : Math.max(s.y1, s.y2)
+      const nodeId = i === 0 ? it.fromId : i === segs.length - 1 ? it.toId : null
+      segRecs.push({ edgeId: it.id, segIndex: i, orient, perp, lo, hi, nodeId })
+    })
+  }
+
+  // Group candidate segments into stacks via connected components: same
+  // orientation, perpendicular gap ≤ proximity, axial overlap ≥ minimum.
+  const offsets = new Map<string, number>()
+  for (const orient of ['H', 'V'] as StackOrient[]) {
+    const pool = segRecs.filter(s => s.orient === orient)
+    const parent = pool.map((_, i) => i)
+    const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i] } return i }
+    const union = (a: number, b: number): void => { parent[find(a)] = find(b) }
+    for (let i = 0; i < pool.length; i++) {
+      for (let j = i + 1; j < pool.length; j++) {
+        const a = pool[i], b = pool[j]
+        if (Math.abs(a.perp - b.perp) > STACK_PROXIMITY) continue
+        const overlap = Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)
+        if (overlap >= STACK_MIN_OVERLAP) union(i, j)
+      }
+    }
+    const groups = new Map<number, StackSegRec[]>()
+    for (let i = 0; i < pool.length; i++) {
+      const r = find(i)
+      ;(groups.get(r) ?? groups.set(r, []).get(r)!).push(pool[i])
+    }
+
+    for (const members of groups.values()) {
+      if (members.length < 2) continue
+      // Seed order by perpendicular position (deterministic tiebreak), then
+      // improve by adjacent transposition until no crossing reduction.
+      let order = [...members].sort((a, b) => a.perp - b.perp || (a.edgeId < b.edgeId ? -1 : 1))
+      const scoreOf = (ord: StackSegRec[]): number => {
+        const tmp = new Map<string, number>()
+        assignStackOffsets(ord, nodePos, tmp)
+        return countStackCrossings(ord, recById, tmp)
+      }
+      let best = scoreOf(order)
+      let improved = true
+      while (improved && best > 0) {
+        improved = false
+        for (let i = 0; i < order.length - 1; i++) {
+          const swapped = [...order]
+          ;[swapped[i], swapped[i + 1]] = [swapped[i + 1], swapped[i]]
+          const s = scoreOf(swapped)
+          if (s < best) { order = swapped; best = s; improved = true }
+        }
+      }
+      assignStackOffsets(order, nodePos, offsets)
+    }
+  }
+
+  // Reconstruct every edge from the accumulated offsets (straight / unstacked
+  // edges have no offsets and pass through unchanged).
+  const result = new Map<string, { segments: Seg[]; midX: number; midY: number }>()
+  for (const it of items) {
+    const rec = recById.get(it.id)!
+    const pts = reconstructPoints(rec, offsets)
+    const segments = pointsToSegs(pts)
+    const k = segments.length
+    let midX: number, midY: number
+    if (k === 2) {
+      midX = pts[1].x; midY = pts[1].y                 // elbow1: the bend
+    } else {
+      const mi = Math.floor(k / 2)                     // straight / elbow2: mid of central segment
+      midX = (pts[mi].x + pts[mi + 1].x) / 2
+      midY = (pts[mi].y + pts[mi + 1].y) / 2
+    }
+    result.set(it.id, { segments, midX, midY })
+  }
+  return result
+}
+
 // ── Vanish mask ───────────────────────────────────────────────────────────────
 
 // Fade starts this far before the intersection so the line is already fully

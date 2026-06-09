@@ -1,4 +1,4 @@
-import type { Graph, GraphAPI, Node, Edge, EdgeRouting, EdgeStyle } from '../types'
+import type { Graph, GraphAPI, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle } from '../types'
 import {
   svgEl,
   makeEdgePath,
@@ -15,6 +15,8 @@ import {
   buildVanishMask,
   cleanupVanishDefs,
   segPathLength,
+  stackEdgeSegments,
+  segmentsToPath,
   type Seg,
 } from './utils'
 import { showPanel, hidePanel } from '../ui/panel'
@@ -31,7 +33,7 @@ export function addInteraction(
   graph: Graph,
   api: GraphAPI,
   options?: { onFocusNode?: (nodeId: string | null) => void },
-): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } {
+): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void; applyRemoteChanges: (changes: GraphChanges) => boolean } {
   svg.style.userSelect = 'none'
 
   const state = { tx: 0, ty: 0, scale: 1 }
@@ -79,14 +81,30 @@ export function addInteraction(
     const defs = getDefs()
     if (!defs) return
 
-    // Precompute segments for every edge so edge-edge intersections work
-    const segMap = new Map<string, Seg[]>()
+    // Base geometry (obstacle-aware routing) for every edge, then the global
+    // stacking pass that spreads overlapping parallel segments into evenly
+    // spaced stacks. The stacked segments drive both the rendered path and the
+    // edge-edge vanish intersections below.
     const edgeById = new Map(graph.edges.map(e => [e.id, e]))
+    const items: { id: string; fromId: string; toId: string; routing: EdgeRouting; segments: Seg[] }[] = []
     for (const edge of graph.edges) {
       try {
         const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, obstaclesFor(edge.from, edge.to))
-        segMap.set(edge.id, geo.segments)
+        items.push({ id: edge.id, fromId: edge.from, toId: edge.to, routing: edge.routing, segments: geo.segments })
       } catch { /* node may be mid-removal */ }
+    }
+
+    const segMap = new Map<string, Seg[]>()
+    for (const [id, geo] of stackEdgeSegments(items, getNodePos)) {
+      segMap.set(id, geo.segments)
+      const edge = edgeById.get(id)
+      if (!edge) continue
+      const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
+      if (path) {
+        path.setAttribute('d', segmentsToPath(geo.segments))
+        path.dataset.midX = String(geo.midX)
+        path.dataset.midY = String(geo.midY)
+      }
     }
 
     for (const edge of graph.edges) {
@@ -205,7 +223,7 @@ export function addInteraction(
   // Apply a line-settings patch to an edge (mutate model, DOM and persist).
   // Does not touch the undo history — callers that originate a user edit should
   // use applyEdgePatch so the change is recorded.
-  function setEdgeSettings(edge: Edge, patch: EdgeSettingsPatch): void {
+  function setEdgeSettings(edge: Edge, patch: EdgeSettingsPatch, persist = true): void {
     Object.assign(edge, patch)
     const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
     if (!path) return
@@ -216,7 +234,7 @@ export function addInteraction(
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
     path.setAttribute('stroke-dasharray', edge.style === 'dashed' ? '6 4' : '')
-    api.patchEdge(edge.id, patch).catch(console.error)
+    if (persist) api.patchEdge(edge.id, patch).catch(console.error)
     rebuildAllVanish()
   }
 
@@ -439,18 +457,18 @@ export function addInteraction(
 
   // ── Internal graph/DOM mutations ───────────────────────────────────────────
 
-  function internalAddNode(node: Node): void {
+  function internalAddNode(node: Node, persist = true): void {
     if (graph.nodes.some(n => n.id === node.id)) return
     graph.nodes.push(node)
     const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
     viewport.appendChild(
       makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)),
     )
-    api.upsertNode(node).catch(console.error)
+    if (persist) api.upsertNode(node).catch(console.error)
     rebuildAllVanish()
   }
 
-  function internalRemoveNode(id: string): void {
+  function internalRemoveNode(id: string, persist = true): void {
     const idx = graph.nodes.findIndex(n => n.id === id)
     if (idx >= 0) graph.nodes.splice(idx, 1)
     graph.edges = graph.edges.filter(e => e.from !== id && e.to !== id)
@@ -461,11 +479,11 @@ export function addInteraction(
       if (eid && defs) cleanupVanishDefs(eid, defs)
       p.remove()
     })
-    api.deleteNode(id).catch(console.error)
+    if (persist) api.deleteNode(id).catch(console.error)
     rebuildAllVanish()
   }
 
-  function internalAddEdge(edge: Edge): void {
+  function internalAddEdge(edge: Edge, persist = true): void {
     if (graph.edges.some(e => e.id === edge.id)) return
     const fromEl = viewport.querySelector(`[data-node-id="${edge.from}"]`)
     const toEl = viewport.querySelector(`[data-node-id="${edge.to}"]`)
@@ -473,22 +491,22 @@ export function addInteraction(
     graph.edges.push(edge)
     const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge, obstaclesFor(edge.from, edge.to))
     viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
-    api.upsertEdge(edge).catch(console.error)
+    if (persist) api.upsertEdge(edge).catch(console.error)
     rebuildAllVanish()
   }
 
-  function internalRemoveEdge(edgeId: string): void {
+  function internalRemoveEdge(edgeId: string, persist = true): void {
     const idx = graph.edges.findIndex(e => e.id === edgeId)
     if (idx < 0) return
     const [edge] = graph.edges.splice(idx, 1)
     const defs = getDefs()
     if (defs) cleanupVanishDefs(edge.id, defs)
     viewport.querySelector(`[data-from="${edge.from}"][data-to="${edge.to}"]`)?.remove()
-    api.deleteEdge(edge.id).catch(console.error)
+    if (persist) api.deleteEdge(edge.id).catch(console.error)
     rebuildAllVanish()
   }
 
-  function internalMoveNode(id: string, pos: { x: number; y: number }): void {
+  function internalMoveNode(id: string, pos: { x: number; y: number }, persist = true): void {
     const node = graph.nodes.find(n => n.id === id)
     if (!node) return
     node.x = pos.x
@@ -501,7 +519,7 @@ export function addInteraction(
       g.setAttribute('transform', `translate(${pos.x - 60},${pos.y - hh})`)
       updateEdgesForNode(id)
     }
-    api.upsertNode(node).catch(console.error)
+    if (persist) api.upsertNode(node).catch(console.error)
   }
 
   // Rebuild a node's <g> in place so its height/wrapping reflects the current
@@ -521,6 +539,7 @@ export function addInteraction(
   function internalUpdateNode(
     id: string,
     patch: Partial<Pick<Node, 'label' | 'status' | 'description' | 'nodeClass'>>,
+    persist = true,
   ): void {
     const node = graph.nodes.find(n => n.id === id)
     if (!node) return
@@ -534,7 +553,7 @@ export function addInteraction(
       const rectEl = viewport.querySelector<SVGRectElement>(`[data-node-id="${id}"] rect`)
       if (rectEl) rectEl.setAttribute('fill', nodeClassFill(node.nodeClass))
     }
-    api.upsertNode(node).catch(console.error)
+    if (persist) api.upsertNode(node).catch(console.error)
   }
 
   // ── Edge toggle ────────────────────────────────────────────────────────────
@@ -722,8 +741,8 @@ export function addInteraction(
     rebuildAllVanish()
   }
 
-  alignPanel.appendChild(makeAlignBtn('Align horizontal', () => performAlign('y')))
-  alignPanel.appendChild(makeAlignBtn('Align vertical', () => performAlign('x')))
+  alignPanel.appendChild(makeAlignBtn('Align on vertical axis', () => performAlign('y')))
+  alignPanel.appendChild(makeAlignBtn('Align on horizontal axis', () => performAlign('x')))
   alignPanel.appendChild(makeAlignBtn('Horizontal even spacing', () => performDistribute('x')))
   alignPanel.appendChild(makeAlignBtn('Vertical even spacing', () => performDistribute('y')))
 
@@ -824,6 +843,56 @@ export function addInteraction(
     if (!entry) return
     applyEntry(entry, 'redo')
     pushUndo(entry)
+  }
+
+  // ── Remote refresh ─────────────────────────────────────────────────────────
+
+  // Apply a diff pulled from the server (concurrent edits by other users) to the
+  // local model and DOM, without persisting it back. Returns false if the apply
+  // was deferred because the user is mid-interaction — the caller should retry on
+  // its next poll without advancing its known revision.
+  //
+  // Deletions are applied before upserts: when an id is deleted and recreated
+  // within one window, the recreated row is the newest server state, so removing
+  // first then re-adding it yields the correct result. Selection/pan/zoom and any
+  // unsaved panel edits are left untouched.
+  function applyRemoteChanges(changes: GraphChanges): boolean {
+    if (activeNode) return false
+    if (changes.nodes.length === 0 && changes.edges.length === 0 && changes.deletions.length === 0) return true
+
+    for (const d of changes.deletions) {
+      if (d.entityType === 'node') internalRemoveNode(d.entityId, false)
+      else internalRemoveEdge(d.entityId, false)
+      selectedNodes.delete(d.entityId)
+      if (_focusedNodeId === d.entityId) { setFocusedNode(null); hidePanel() }
+    }
+
+    for (const node of changes.nodes) {
+      const existing = graph.nodes.find(n => n.id === node.id)
+      if (!existing) { internalAddNode(node, false); continue }
+      if (existing.x !== node.x || existing.y !== node.y) {
+        internalMoveNode(node.id, { x: node.x, y: node.y }, false)
+      }
+      const patch: Partial<Pick<Node, 'label' | 'status' | 'description' | 'nodeClass'>> = {}
+      if (existing.label !== node.label) patch.label = node.label
+      if (existing.status !== node.status) patch.status = node.status
+      if (existing.description !== node.description) patch.description = node.description
+      if (existing.nodeClass !== node.nodeClass) patch.nodeClass = node.nodeClass
+      if (Object.keys(patch).length > 0) internalUpdateNode(node.id, patch, false)
+    }
+
+    for (const edge of changes.edges) {
+      const existing = graph.edges.find(e => e.id === edge.id)
+      if (!existing) { internalAddEdge(edge, false); continue }
+      const patch: EdgeSettingsPatch = {}
+      if (existing.routing !== edge.routing) patch.routing = edge.routing
+      if (existing.style !== edge.style) patch.style = edge.style
+      if (existing.vanish !== edge.vanish) patch.vanish = edge.vanish
+      if (Object.keys(patch).length > 0) setEdgeSettings(existing, patch, false)
+    }
+
+    refreshHighlights()
+    return true
   }
 
   // ── Public controls ───────────────────────────────────────────────────────
@@ -1140,5 +1209,5 @@ export function addInteraction(
     })
   }
 
-  return { setAuthenticated, centerOnNode, undo: performUndo, redo: performRedo }
+  return { setAuthenticated, centerOnNode, undo: performUndo, redo: performRedo, applyRemoteChanges }
 }

@@ -1,4 +1,4 @@
-import type { Graph, GraphAPI } from '../types'
+import type { Graph, GraphAPI, GraphChanges } from '../types'
 import { svgEl, makeEdgePath, makeNodeEl, nodeBorderColor, nodeIsReady, nodeHalfHeight } from './utils'
 import { addInteraction } from './interaction'
 
@@ -7,7 +7,7 @@ export function renderGraph(
   container: HTMLElement,
   api: GraphAPI,
   options?: { onFocusNode?: (nodeId: string | null) => void },
-): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void } {
+): { setAuthenticated: (auth: boolean) => void; centerOnNode: (id: string) => void; undo: () => void; redo: () => void; applyRemoteChanges: (changes: GraphChanges) => boolean } {
   container.innerHTML = ''
 
   const svg = svgEl('svg')
