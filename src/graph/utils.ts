@@ -7,7 +7,7 @@ export const NODE_CLASS_FILLS: Record<string, string> = {
   Logic:    '#4a1212',
   Graphics: '#2e1a52',
   Sound:    '#4a2e14',
-  Research: '#1535c4',
+  Research: '#00f0ff',
 }
 export const NODE_DEFAULT_FILL = '#1f2937'
 
