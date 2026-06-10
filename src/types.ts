@@ -13,6 +13,11 @@ export interface Node {
   nodeClass?: NodeClass
 }
 
+// Manual placement of an elbow2 middle segment. `midAxis` is the coordinate the
+// segment is pinned on ('x' = vertical middle segment, 'y' = horizontal) and
+// `midPos` is its position on that axis. null/undefined = automatic placement.
+export type MidAxis = 'x' | 'y'
+
 export interface Edge {
   id: string
   from: string
@@ -20,6 +25,8 @@ export interface Edge {
   routing: EdgeRouting
   style: EdgeStyle
   vanish: boolean
+  midAxis?: MidAxis | null
+  midPos?: number | null
 }
 
 export interface Graph {
@@ -41,7 +48,7 @@ export interface GraphAPI {
   deleteNode: (id: string) => Promise<void>
   upsertEdge: (edge: Edge) => Promise<void>
   deleteEdge: (id: string) => Promise<void>
-  patchEdge: (id: string, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>) => Promise<void>
+  patchEdge: (id: string, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish' | 'midAxis' | 'midPos'>>) => Promise<void>
 }
 
 export interface AuditEntry {

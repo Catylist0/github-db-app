@@ -1,4 +1,4 @@
-import type { Node, NodeStatus, Edge, EdgeRouting } from '../types'
+import type { Node, NodeStatus, Edge, EdgeRouting, MidAxis } from '../types'
 
 const NS = 'http://www.w3.org/2000/svg'
 
@@ -322,11 +322,23 @@ function pickElbow(
   return best.shape
 }
 
+// Manual override for an elbow2 middle segment: pin it at `pos` on `axis`.
+export type MidOverride = { axis: MidAxis; pos: number }
+
+// The persisted manual middle-segment placement of an edge, when it applies.
+export function edgeMidOverride(edge?: Partial<Edge> | null): MidOverride | null {
+  if (!edge || edge.routing !== 'elbow2') return null
+  if (edge.midAxis !== 'x' && edge.midAxis !== 'y') return null
+  if (edge.midPos === null || edge.midPos === undefined) return null
+  return { axis: edge.midAxis, pos: edge.midPos }
+}
+
 export function computeEdgeGeometry(
   fromPos: { x: number; y: number; hh?: number },
   toPos: { x: number; y: number; hh?: number },
   routing: EdgeRouting = 'straight',
   obstacles: Node[] = [],
+  mid: MidOverride | null = null,
 ): EdgeGeometry {
   const fc = fromPos
   const tc = toPos
@@ -350,6 +362,14 @@ export function computeEdgeGeometry(
   }
 
   if (routing === 'elbow2') {
+    // A manually placed middle segment overrides the automatic candidate
+    // search: the user dragged it to this position, so render exactly there.
+    if (mid) {
+      return mid.axis === 'x'
+        ? elbow2Horizontal(fc, tc, fromHH, toHH, mid.pos)
+        : elbow2Vertical(fc, tc, fromHH, toHH, mid.pos)
+    }
+
     // A two-joint (three-segment) orthogonal elbow is either horizontal-first
     // (exits/enters left or right) or vertical-first (exits/enters top or
     // bottom). For each orientation the bend line can sit *between* the nodes
@@ -1064,7 +1084,7 @@ export function makeEdgePath(
 ): SVGPathElement {
   const routing: EdgeRouting = edge?.routing ?? 'straight'
   const edgeId = edge?.id ?? `${fromId}-${toId}`
-  const geo = computeEdgeGeometry(fromPos, toPos, routing, obstacles)
+  const geo = computeEdgeGeometry(fromPos, toPos, routing, obstacles, edgeMidOverride(edge))
 
   const path = svgEl('path')
   path.setAttribute('d', displayPathFromSegments(geo.segments))

@@ -109,6 +109,10 @@ async function initSchema(db) {
   try { await db.prepare("ALTER TABLE edges ADD COLUMN routing TEXT NOT NULL DEFAULT 'straight'").run() } catch { /* exists */ }
   try { await db.prepare("ALTER TABLE edges ADD COLUMN style TEXT NOT NULL DEFAULT 'solid'").run() } catch { /* exists */ }
   try { await db.prepare('ALTER TABLE edges ADD COLUMN vanish INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
+  // Manual elbow2 middle-segment placement: which axis the segment is pinned on
+  // ('x' or 'y') and its position. NULL = automatic placement.
+  try { await db.prepare('ALTER TABLE edges ADD COLUMN mid_axis TEXT').run() } catch { /* exists */ }
+  try { await db.prepare('ALTER TABLE edges ADD COLUMN mid_pos REAL').run() } catch { /* exists */ }
   try { await db.prepare('ALTER TABLE nodes ADD COLUMN rev INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
   try { await db.prepare('ALTER TABLE edges ADD COLUMN rev INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
   await db.batch([
@@ -318,10 +322,17 @@ export default {
       const id = decodeURIComponent(segments[1])
       const before = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
       const { label, x, y, description, status, node_class } = await request.json()
+      // Moving a node invalidates any manually placed elbow middle segments on
+      // its edges — clear them (with a rev bump) so every client falls back to
+      // automatic placement.
+      const moved = before !== null && (before.x !== x || before.y !== y)
       await env.DB.batch([
         bump(env.DB),
         env.DB.prepare(`INSERT OR REPLACE INTO nodes (id,label,x,y,description,status,node_class,rev) VALUES (?,?,?,?,?,?,?,${REV})`)
           .bind(id, label, x, y, description ?? null, status ?? 'planned', node_class ?? null),
+        ...(moved ? [
+          env.DB.prepare(`UPDATE edges SET mid_axis=NULL, mid_pos=NULL, rev=${REV} WHERE (source=? OR target=?) AND mid_pos IS NOT NULL`).bind(id, id),
+        ] : []),
         clearTombstone(env.DB, 'node', id),
       ])
       const after = (await env.DB.prepare('SELECT * FROM nodes WHERE id=?').bind(id).first()) ?? null
@@ -354,13 +365,14 @@ export default {
 
     // POST /edges
     if (request.method === 'POST' && path === '/edges') {
-      const { id, source, target, routing, style, vanish } = await request.json()
+      const { id, source, target, routing, style, vanish, mid_axis, mid_pos } = await request.json()
       const r = routing ?? 'straight', s = style ?? 'solid', v = vanish ? 1 : 0
-      const after = { id, source, target, routing: r, style: s, vanish: v }
+      const ma = mid_axis ?? null, mp = mid_pos ?? null
+      const after = { id, source, target, routing: r, style: s, vanish: v, mid_axis: ma, mid_pos: mp }
       await env.DB.batch([
         bump(env.DB),
-        env.DB.prepare(`INSERT OR IGNORE INTO edges (id,source,target,routing,style,vanish,rev) VALUES (?,?,?,?,?,?,${REV})`)
-          .bind(id, source, target, r, s, v),
+        env.DB.prepare(`INSERT OR IGNORE INTO edges (id,source,target,routing,style,vanish,mid_axis,mid_pos,rev) VALUES (?,?,?,?,?,?,?,?,${REV})`)
+          .bind(id, source, target, r, s, v, ma, mp),
         clearTombstone(env.DB, 'edge', id),
         env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
           .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_edge', 'edge', id, JSON.stringify({ before: null, after })),
@@ -372,13 +384,17 @@ export default {
     if (request.method === 'PATCH' && segments[0] === 'edges' && segments[1]) {
       const id = decodeURIComponent(segments[1])
       const before = (await env.DB.prepare('SELECT * FROM edges WHERE id=?').bind(id).first()) ?? null
-      const { routing, style, vanish } = await request.json()
+      const { routing, style, vanish, mid_axis, mid_pos } = await request.json()
       const r = routing ?? before?.routing ?? 'straight'
       const s = style ?? before?.style ?? 'solid'
       const v = vanish !== undefined ? (vanish ? 1 : 0) : (before?.vanish ?? 0)
+      // mid_axis / mid_pos are nullable: an explicit null clears the manual
+      // middle-segment placement, while an absent key keeps the stored value.
+      const ma = mid_axis !== undefined ? mid_axis : (before?.mid_axis ?? null)
+      const mp = mid_pos !== undefined ? mid_pos : (before?.mid_pos ?? null)
       await env.DB.batch([
         bump(env.DB),
-        env.DB.prepare(`UPDATE edges SET routing=?, style=?, vanish=?, rev=${REV} WHERE id=?`).bind(r, s, v, id),
+        env.DB.prepare(`UPDATE edges SET routing=?, style=?, vanish=?, mid_axis=?, mid_pos=?, rev=${REV} WHERE id=?`).bind(r, s, v, ma, mp, id),
       ])
       const after = (await env.DB.prepare('SELECT * FROM edges WHERE id=?').bind(id).first()) ?? null
       await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')

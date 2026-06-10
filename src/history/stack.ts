@@ -6,8 +6,9 @@ export type MoveRecord = {
   to: { x: number; y: number }
 }
 
-// The mutable line settings of an edge (routing / style / vanish).
-export type EdgeSettingsPatch = Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>
+// The mutable line settings of an edge (routing / style / vanish / manual
+// middle-segment placement).
+export type EdgeSettingsPatch = Partial<Pick<Edge, 'routing' | 'style' | 'vanish' | 'midAxis' | 'midPos'>>
 
 export type HistoryEntry =
   | { type: 'create-node'; node: Node }

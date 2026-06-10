@@ -1,4 +1,4 @@
-import type { Graph, GraphAPI, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle } from '../types'
+import type { Graph, GraphAPI, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle, MidAxis } from '../types'
 import {
   svgEl,
   makeEdgePath,
@@ -15,6 +15,7 @@ import {
   NODE_STROKE_WIDTH,
   SELECTED_NODE_STROKE_WIDTH,
   computeEdgeGeometry,
+  edgeMidOverride,
   buildVanishMask,
   cleanupVanishDefs,
   segPathLength,
@@ -91,7 +92,7 @@ export function addInteraction(
     const items: { id: string; fromId: string; toId: string; routing: EdgeRouting; segments: Seg[] }[] = []
     for (const edge of graph.edges) {
       try {
-        const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, obstaclesFor(edge.from, edge.to))
+        const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, obstaclesFor(edge.from, edge.to), edgeMidOverride(edge))
         items.push({ id: edge.id, fromId: edge.from, toId: edge.to, routing: edge.routing, segments: geo.segments })
       } catch { /* node may be mid-removal */ }
     }
@@ -168,14 +169,73 @@ export function addInteraction(
     return path
   }
 
+  // Grab hand: a closed fist — rounded palm with four knuckle bumps on top.
+  function makeGrabHandIcon(): SVGElement {
+    const path = svgEl('path')
+    path.setAttribute('d',
+      'M -4.6 1 L -4.6 -1.8 A 1.15 1.15 0 0 1 -2.3 -1.8 L -2.3 -3.2 ' +
+      'A 1.15 1.15 0 0 1 0 -3.2 L 0 -3.8 A 1.15 1.15 0 0 1 2.3 -3.8 ' +
+      'L 2.3 -2.6 A 1.15 1.15 0 0 1 4.6 -2.6 L 4.6 2 ' +
+      'Q 4.6 5.5 1 5.5 L -1.4 5.5 Q -4.6 5.5 -4.6 1 Z')
+    return path
+  }
+
+  // ── Elbow2 middle-segment drag ─────────────────────────────────────────────
+  // Dragging the grab handle pins the elbow's middle segment at a manual
+  // position along its orthogonal axis (edge.midAxis / edge.midPos). The
+  // override persists until the user double-clicks the handle or either
+  // endpoint node moves.
+  let midDrag: {
+    edge: Edge
+    axis: MidAxis
+    startPos: number
+    startClient: { x: number; y: number }
+    before: { midAxis: MidAxis | null; midPos: number | null }
+    btn: SVGGElement
+    moved: boolean
+  } | null = null
+  // A drag's mouseup still counts towards `dblclick`, so a drag followed by a
+  // quick click would wrongly reset the override — ignore dblclicks that land
+  // right after a real drag ended.
+  let lastMidDragEnd = 0
+
+  function startMidDrag(edge: Edge, btn: SVGGElement, e: MouseEvent): void {
+    const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, obstaclesFor(edge.from, edge.to), edgeMidOverride(edge))
+    if (geo.segments.length !== 3) return
+    const mid = geo.segments[1]
+    // A vertical middle segment moves along x; a horizontal one along y.
+    const axis: MidAxis = Math.abs(mid.x2 - mid.x1) < 0.5 ? 'x' : 'y'
+    midDrag = {
+      edge,
+      axis,
+      startPos: axis === 'x' ? mid.x1 : mid.y1,
+      startClient: { x: e.clientX, y: e.clientY },
+      before: { midAxis: edge.midAxis ?? null, midPos: edge.midPos ?? null },
+      btn,
+      moved: false,
+    }
+  }
+
+  function clearMidOverridesForNode(nodeId: string): void {
+    for (const edge of graph.edges) {
+      if (edge.from !== nodeId && edge.to !== nodeId) continue
+      if (edge.midAxis == null && edge.midPos == null) continue
+      // No persistence here: the worker clears these rows itself whenever the
+      // node's new position is PATCHed, so a local reset keeps us in sync.
+      edge.midAxis = null
+      edge.midPos = null
+    }
+  }
+
   function svgIconBtn(
     icon: string | SVGElement,
     hoverColor: string,
     onClick: (e: MouseEvent) => void,
-    opts: { r?: number; fontSize?: number } = {},
+    opts: { r?: number; fontSize?: number; baseStroke?: string } = {},
   ): SVGGElement {
     const r = opts.r ?? 11
     const fontSize = opts.fontSize ?? 14
+    const baseStroke = opts.baseStroke ?? '#30363d'
 
     const g = svgEl('g')
     g.style.cursor = 'pointer'
@@ -184,7 +244,7 @@ export function addInteraction(
     const circle = svgEl('circle')
     circle.setAttribute('r', String(r))
     circle.setAttribute('fill', '#161b22')
-    circle.setAttribute('stroke', '#30363d')
+    circle.setAttribute('stroke', baseStroke)
     circle.setAttribute('stroke-width', '1.5')
     g.appendChild(circle)
 
@@ -214,7 +274,7 @@ export function addInteraction(
     })
     g.addEventListener('mouseleave', () => {
       circle.setAttribute('fill', '#161b22')
-      circle.setAttribute('stroke', '#30363d')
+      circle.setAttribute('stroke', baseStroke)
       g.style.color = '#c9d1d9'
     })
     g.addEventListener('mousedown', e => e.stopPropagation())
@@ -231,7 +291,7 @@ export function addInteraction(
     if (!path) return
     const fromPos = getNodePos(edge.from)
     const toPos = getNodePos(edge.to)
-    const geo = computeEdgeGeometry(fromPos, toPos, edge.routing, obstaclesFor(edge.from, edge.to))
+    const geo = computeEdgeGeometry(fromPos, toPos, edge.routing, obstaclesFor(edge.from, edge.to), edgeMidOverride(edge))
     path.setAttribute('d', displayPathFromSegments(geo.segments))
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
@@ -259,8 +319,41 @@ export function addInteraction(
   function buildIconCluster(edge: Edge, midVpX: number, midVpY: number): SVGGElement {
     const g = svgEl('g')
 
-    type Item = { icon: string | SVGElement; color: string; r?: number; fontSize?: number; fn: (e: MouseEvent) => void }
+    type Item = {
+      icon: string | SVGElement
+      color: string
+      r?: number
+      fontSize?: number
+      baseStroke?: string
+      setup?: (btn: SVGGElement) => void
+      fn: (e: MouseEvent) => void
+    }
     const items: Item[] = []
+
+    if (edge.routing === 'elbow2') {
+      const overridden = edgeMidOverride(edge) !== null
+      items.push({
+        icon: makeGrabHandIcon(),
+        color: '#58a6ff',
+        // Blue ring = the middle segment is pinned off its automatic position.
+        baseStroke: overridden ? SELECTED_STROKE : undefined,
+        setup: (btn) => {
+          btn.style.cursor = 'grab'
+          btn.addEventListener('mousedown', (e) => {
+            e.stopPropagation()
+            startMidDrag(edge, btn, e)
+          })
+          btn.addEventListener('dblclick', (e) => {
+            e.stopPropagation()
+            if (Date.now() - lastMidDragEnd < 500) return
+            if (edgeMidOverride(edge) === null) return
+            applyEdgePatch(edge, { midAxis: null, midPos: null })
+            updateIconClusters()
+          })
+        },
+        fn: (e) => e.stopPropagation(),
+      })
+    }
 
     if (edgeClipboard) {
       items.push({ icon: makeClipboardIcon(), color: '#22c55e', fn: (e) => {
@@ -294,14 +387,18 @@ export function addInteraction(
       )
     }})
 
+    // Arrange the buttons on a ring around the edge midpoint, starting at the
+    // top. The radius grows with the count so neighbouring circles keep at
+    // least ~30px between centres.
     const spacing = 30
-    const totalW = (items.length - 1) * spacing
-    const offsetX = -totalW / 2
-
-    for (let i = 0; i < items.length; i++) {
-      const { icon, color, r, fontSize, fn } = items[i]
-      const btn = svgIconBtn(icon, color, fn, { r, fontSize })
-      btn.setAttribute('transform', `translate(${offsetX + i * spacing},0)`)
+    const n = items.length
+    const ringR = n > 1 ? Math.max(18, spacing / (2 * Math.sin(Math.PI / n))) : 0
+    for (let i = 0; i < n; i++) {
+      const { icon, color, r, fontSize, baseStroke, setup, fn } = items[i]
+      const btn = svgIconBtn(icon, color, fn, { r, fontSize, baseStroke })
+      const angle = -Math.PI / 2 + (i * 2 * Math.PI) / n
+      btn.setAttribute('transform', `translate(${ringR * Math.cos(angle)},${ringR * Math.sin(angle)})`)
+      setup?.(btn)
       g.appendChild(btn)
     }
 
@@ -445,8 +542,8 @@ export function addInteraction(
     const from = getNodePos(fromId)
     const to = getNodePos(toId)
     const edgeId = path.dataset.edgeId
-    const routing = (edgeId ? graph.edges.find(e => e.id === edgeId)?.routing : undefined) ?? 'straight'
-    const geo = computeEdgeGeometry(from, to, routing, obstaclesFor(fromId, toId))
+    const edge = edgeId ? graph.edges.find(e => e.id === edgeId) : undefined
+    const geo = computeEdgeGeometry(from, to, edge?.routing ?? 'straight', obstaclesFor(fromId, toId), edgeMidOverride(edge))
     path.setAttribute('d', displayPathFromSegments(geo.segments))
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
@@ -514,6 +611,7 @@ export function addInteraction(
   function internalMoveNode(id: string, pos: { x: number; y: number }, persist = true): void {
     const node = graph.nodes.find(n => n.id === id)
     if (!node) return
+    if (node.x !== pos.x || node.y !== pos.y) clearMidOverridesForNode(id)
     node.x = pos.x
     node.y = pos.y
     const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
@@ -893,6 +991,8 @@ export function addInteraction(
       if (existing.routing !== edge.routing) patch.routing = edge.routing
       if (existing.style !== edge.style) patch.style = edge.style
       if (existing.vanish !== edge.vanish) patch.vanish = edge.vanish
+      if ((existing.midAxis ?? null) !== (edge.midAxis ?? null)) patch.midAxis = edge.midAxis ?? null
+      if ((existing.midPos ?? null) !== (edge.midPos ?? null)) patch.midPos = edge.midPos ?? null
       if (Object.keys(patch).length > 0) setEdgeSettings(existing, patch, false)
     }
 
@@ -1028,6 +1128,34 @@ export function addInteraction(
   })
 
   window.addEventListener('mousemove', (e: MouseEvent) => {
+    if (midDrag) {
+      const d = midDrag.axis === 'x'
+        ? e.clientX - midDrag.startClient.x
+        : e.clientY - midDrag.startClient.y
+      if (!midDrag.moved && Math.abs(d) > DRAG_THRESHOLD) {
+        midDrag.moved = true
+        midDrag.btn.querySelector('circle')?.setAttribute('stroke', SELECTED_STROKE)
+        midDrag.btn.style.cursor = 'grabbing'
+      }
+      if (midDrag.moved) {
+        const edge = midDrag.edge
+        edge.midAxis = midDrag.axis
+        edge.midPos = midDrag.startPos + d / state.scale
+        const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
+        if (path) {
+          refreshEdgePath(path)
+          // Keep the icon cluster riding on the segment as it moves.
+          const cluster = iconClusters.find(c => c.edgeId === edge.id)
+          if (cluster) {
+            cluster.midVpX = Number(path.dataset.midX)
+            cluster.midVpY = Number(path.dataset.midY)
+            positionIconClusters()
+          }
+        }
+      }
+      return
+    }
+
     if (activeNode) {
       const dx = e.clientX - dragClientStart.x
       const dy = e.clientY - dragClientStart.y
@@ -1035,6 +1163,10 @@ export function addInteraction(
         if (!authenticated) return
         hasDragged = true
         activeNode.style.cursor = 'grabbing'
+        // Moving a node resets any manual middle-segment placement on its
+        // edges; the server clears the persisted values when the move lands.
+        if (isMultiDrag) for (const id of multiDragOrigins.keys()) clearMidOverridesForNode(id)
+        else clearMidOverridesForNode(activeNode.dataset.nodeId!)
       }
       if (hasDragged) {
         if (isMultiDrag) {
@@ -1080,6 +1212,23 @@ export function addInteraction(
   })
 
   window.addEventListener('mouseup', (e: MouseEvent) => {
+    if (midDrag) {
+      const { edge, before, moved } = midDrag
+      midDrag = null
+      if (moved) {
+        lastMidDragEnd = Date.now()
+        // Roll the edge back to its pre-drag values so applyEdgePatch records
+        // the change as one undoable step and persists the final position.
+        const finalAxis = edge.midAxis ?? null
+        const finalPos = edge.midPos ?? null
+        edge.midAxis = before.midAxis
+        edge.midPos = before.midPos
+        applyEdgePatch(edge, { midAxis: finalAxis, midPos: finalPos })
+        updateIconClusters()
+      }
+      return
+    }
+
     if (activeNode) {
       if (hasDragged) {
         const moved = isMultiDrag ? [...multiDragOrigins.keys()] : [activeNode.dataset.nodeId!]

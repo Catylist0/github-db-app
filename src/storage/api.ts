@@ -1,9 +1,9 @@
 import { getToken } from '../auth/github'
 import { WORKER_URL } from '../config'
-import type { Graph, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle, AuditPage } from '../types'
+import type { Graph, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle, MidAxis, AuditPage } from '../types'
 
 type NodeRow = Omit<Node, 'nodeClass'> & { node_class?: string | null }
-type EdgeRow = { id: string; source: string; target: string; routing?: string; style?: string; vanish?: number }
+type EdgeRow = { id: string; source: string; target: string; routing?: string; style?: string; vanish?: number; mid_axis?: string | null; mid_pos?: number | null }
 
 function mapNode(n: NodeRow): Node {
   return { ...n, nodeClass: (n.node_class ?? undefined) as Node['nodeClass'] }
@@ -17,6 +17,8 @@ function mapEdge(e: EdgeRow): Edge {
     routing: (e.routing ?? 'straight') as EdgeRouting,
     style: (e.style ?? 'solid') as EdgeStyle,
     vanish: Boolean(e.vanish),
+    midAxis: (e.mid_axis ?? null) as MidAxis | null,
+    midPos: e.mid_pos ?? null,
   }
 }
 
@@ -103,14 +105,20 @@ export async function deleteNode(id: string): Promise<void> {
 export async function upsertEdge(edge: Edge): Promise<void> {
   await apiFetch('/edges', {
     method: 'POST',
-    body: JSON.stringify({ id: edge.id, source: edge.from, target: edge.to, routing: edge.routing, style: edge.style, vanish: edge.vanish }),
+    body: JSON.stringify({ id: edge.id, source: edge.from, target: edge.to, routing: edge.routing, style: edge.style, vanish: edge.vanish, mid_axis: edge.midAxis ?? null, mid_pos: edge.midPos ?? null }),
   })
 }
 
-export async function patchEdge(id: string, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish'>>): Promise<void> {
+export async function patchEdge(id: string, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish' | 'midAxis' | 'midPos'>>): Promise<void> {
+  const body: Record<string, unknown> = {}
+  if (patch.routing !== undefined) body.routing = patch.routing
+  if (patch.style !== undefined) body.style = patch.style
+  if (patch.vanish !== undefined) body.vanish = patch.vanish
+  if (patch.midAxis !== undefined) body.mid_axis = patch.midAxis
+  if (patch.midPos !== undefined) body.mid_pos = patch.midPos
   await apiFetch(`/edges/${encodeURIComponent(id)}`, {
     method: 'PATCH',
-    body: JSON.stringify(patch),
+    body: JSON.stringify(body),
   })
 }
 
