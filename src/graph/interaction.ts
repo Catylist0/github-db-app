@@ -11,17 +11,18 @@ import {
   displayPathFromSegments,
   nodeHalfHeight,
   setPulse,
-  NODE_HH,
+  NODE_HW,
   NODE_STROKE_WIDTH,
   SELECTED_NODE_STROKE_WIDTH,
-  computeEdgeGeometry,
-  edgeMidOverride,
   buildVanishMask,
   cleanupVanishDefs,
   segPathLength,
-  stackEdgeSegments,
   type Seg,
 } from './utils'
+import { computeEdgeGeometry, edgeMidOverride } from './layout/route'
+import { SpatialGrid } from './layout/grid'
+import { LayoutScheduler } from './layout/scheduler'
+import type { LayoutInput, LayoutResult, NodeSnap } from './layout/types'
 import { showPanel, hidePanel } from '../ui/panel'
 import { record, popUndo, pushRedo, popRedo, pushUndo, clearHistory } from '../history/stack'
 import { openEdgeDialog, closeEdgeDialog, isEdgeDialogOpen } from '../ui/edge-dialog'
@@ -29,6 +30,9 @@ import type { HistoryEntry, EdgeSettingsPatch } from '../history/stack'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
+// Min interval between mid-drag layout requests. The work is async and results
+// are superseded anyway; this just avoids flooding the worker with snapshots.
+const DRAG_LAYOUT_INTERVAL_MS = 120
 
 export function addInteraction(
   svg: SVGSVGElement,
@@ -59,6 +63,66 @@ export function addInteraction(
     return { x: r.left + state.tx + vpX * state.scale, y: r.top + state.ty + vpY * state.scale }
   }
 
+  // ── Model-backed indexes ───────────────────────────────────────────────────
+  // The interaction hot paths (drag frames, layout application) never query
+  // the DOM — elements, positions and adjacency are tracked in maps that are
+  // maintained alongside every mutation.
+
+  const nodeElById = new Map<string, SVGGElement>()
+  const pathById = new Map<string, SVGPathElement>()
+  const edgeById = new Map<string, Edge>()
+  const edgesByNode = new Map<string, Set<string>>()
+  const livePos = new Map<string, { x: number; y: number; hh: number }>()
+
+  function indexEdge(edge: Edge): void {
+    edgeById.set(edge.id, edge)
+    for (const id of [edge.from, edge.to]) {
+      const set = edgesByNode.get(id)
+      if (set) set.add(edge.id)
+      else edgesByNode.set(id, new Set([edge.id]))
+    }
+  }
+
+  function unindexEdge(edge: Edge): void {
+    edgeById.delete(edge.id)
+    edgesByNode.get(edge.from)?.delete(edge.id)
+    edgesByNode.get(edge.to)?.delete(edge.id)
+  }
+
+  for (const g of viewport.querySelectorAll<SVGGElement>('[data-node-id]')) {
+    nodeElById.set(g.dataset.nodeId!, g)
+  }
+  for (const p of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
+    pathById.set(p.dataset.edgeId!, p)
+  }
+  for (const n of graph.nodes) {
+    livePos.set(n.id, { x: n.x, y: n.y, hh: nodeHalfHeight(n.label) })
+  }
+  for (const e of graph.edges) indexEdge(e)
+
+  function getNodePos(id: string): { x: number; y: number; hh: number } {
+    const p = livePos.get(id)
+    if (p) return p
+    const node = graph.nodes.find(n => n.id === id)!
+    const fresh = { x: node.x, y: node.y, hh: nodeHalfHeight(node.label) }
+    livePos.set(id, fresh)
+    return fresh
+  }
+
+  // Obstacle index for elbow routing, rebuilt lazily after any position change.
+  let obstacleGrid: SpatialGrid | null = null
+  function invalidateGrid(): void {
+    obstacleGrid = null
+  }
+  function getGrid(): SpatialGrid {
+    if (!obstacleGrid) {
+      const snaps: NodeSnap[] = []
+      for (const [id, p] of livePos) snaps.push({ id, x: p.x, y: p.y, hh: p.hh })
+      obstacleGrid = new SpatialGrid(snaps)
+    }
+    return obstacleGrid
+  }
+
   // ── Auth state ─────────────────────────────────────────────────────────────
   let authenticated = false
 
@@ -74,70 +138,117 @@ export function addInteraction(
   // ── Edge clipboard ─────────────────────────────────────────────────────────
   let edgeClipboard: { routing: EdgeRouting; style: EdgeStyle; vanish: boolean } | null = null
 
-  // ── Vanish mask management ─────────────────────────────────────────────────
+  // ── Async layout ───────────────────────────────────────────────────────────
+  // All stacking runs in the layout worker. Every model change requests a
+  // fresh pass with the current snapshot; the scheduler discards superseded
+  // results, so what lands here always reflects the latest known model state.
 
   function getDefs(): SVGDefsElement | null {
     return svg.querySelector<SVGDefsElement>('defs')
   }
 
-  function rebuildAllVanish(): void {
-    const defs = getDefs()
-    if (!defs) return
+  let lastLayout: LayoutResult | null = null
+  let vanishTimer: number | null = null
 
-    // Base geometry (obstacle-aware routing) for every edge, then the global
-    // stacking pass that spreads overlapping parallel segments into evenly
-    // spaced stacks. The stacked segments drive both the rendered path and the
-    // edge-edge vanish intersections below.
-    const edgeById = new Map(graph.edges.map(e => [e.id, e]))
-    const items: { id: string; fromId: string; toId: string; routing: EdgeRouting; segments: Seg[] }[] = []
-    for (const edge of graph.edges) {
-      try {
-        const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, obstaclesFor(edge.from, edge.to), edgeMidOverride(edge))
-        items.push({ id: edge.id, fromId: edge.from, toId: edge.to, routing: edge.routing, segments: geo.segments })
-      } catch { /* node may be mid-removal */ }
+  function layoutInput(): LayoutInput {
+    const nodes: NodeSnap[] = []
+    for (const [id, p] of livePos) nodes.push({ id, x: p.x, y: p.y, hh: p.hh })
+    return {
+      nodes,
+      edges: graph.edges.map(e => ({
+        id: e.id,
+        from: e.from,
+        to: e.to,
+        routing: e.routing,
+        midAxis: e.midAxis ?? null,
+        midPos: e.midPos ?? null,
+      })),
     }
+  }
+
+  function requestLayout(): void {
+    scheduler.request(layoutInput())
+  }
+
+  function draggedNodeIdSet(): Set<string> {
+    const ids = new Set<string>()
+    if (activeNode && hasDragged) {
+      if (isMultiDrag) for (const id of multiDragOrigins.keys()) ids.add(id)
+      else ids.add(activeNode.dataset.nodeId!)
+    }
+    return ids
+  }
+
+  function applyLayout(result: LayoutResult): void {
+    lastLayout = result
+    // Mid-drag results still land (neighbouring stacks adjust locally), but
+    // edges attached to the dragged node — and a mid-segment being dragged —
+    // are owned by the per-frame local pass, which has newer positions.
+    const dragged = draggedNodeIdSet()
+    const draggedEdgeId = midDrag?.moved ? midDrag.edge.id : null
+    for (const edge of graph.edges) {
+      const geo = result.edges[edge.id]
+      if (!geo) continue
+      if (edge.id === draggedEdgeId || dragged.has(edge.from) || dragged.has(edge.to)) continue
+      const path = pathById.get(edge.id)
+      if (!path) continue
+      const d = displayPathFromSegments(geo.segments)
+      if (path.getAttribute('d') !== d) path.setAttribute('d', d)
+      path.dataset.midX = String(geo.midX)
+      path.dataset.midY = String(geo.midY)
+    }
+    // Stacking moves edge midpoints, which the icon clusters ride on.
+    if (!activeNode && !midDrag) updateIconClusters()
+    scheduleVanish()
+  }
+
+  const scheduler = new LayoutScheduler(applyLayout)
+
+  function scheduleVanish(): void {
+    if (vanishTimer !== null) window.clearTimeout(vanishTimer)
+    vanishTimer = window.setTimeout(() => {
+      vanishTimer = null
+      rebuildVanishMasks()
+    }, 0)
+  }
+
+  // Rebuild vanish masks from the latest layout. Deferred and skipped while a
+  // drag is live — masks are DOM-heavy and the crossings are still changing.
+  function rebuildVanishMasks(): void {
+    if (activeNode || midDrag) return
+    const defs = getDefs()
+    if (!defs || !lastLayout) return
 
     const segMap = new Map<string, Seg[]>()
-    for (const [id, geo] of stackEdgeSegments(items, getNodePos)) {
-      segMap.set(id, geo.segments)
-      const edge = edgeById.get(id)
-      if (!edge) continue
-      const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
-      if (path) {
-        path.setAttribute('d', displayPathFromSegments(geo.segments))
-        path.dataset.midX = String(geo.midX)
-        path.dataset.midY = String(geo.midY)
-      }
+    for (const edge of graph.edges) {
+      const geo = lastLayout.edges[edge.id]
+      if (geo) segMap.set(edge.id, geo.segments)
     }
 
+    const allEntries = [...segMap.entries()].map(([id, segs]) => ({
+      id,
+      segs,
+      vanish: edgeById.get(id)?.vanish ?? false,
+      length: segPathLength(segs),
+    }))
+
     for (const edge of graph.edges) {
+      const path = pathById.get(edge.id)
       if (!edge.vanish) {
         // Remove any stale mask
         cleanupVanishDefs(edge.id, defs)
-        const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
         path?.removeAttribute('mask')
         continue
       }
 
       const mySegs = segMap.get(edge.id)
-      if (!mySegs) continue
-
-      const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
-      if (!path) continue
+      if (!mySegs || !path) continue
 
       cleanupVanishDefs(edge.id, defs)
 
       const myLength = segPathLength(mySegs)
-      const otherEdges = [...segMap.entries()]
-        .filter(([id]) => id !== edge.id)
-        .map(([id, segs]) => ({
-          id,
-          segs,
-          vanish: edgeById.get(id)?.vanish ?? false,
-          length: segPathLength(segs),
-        }))
-
-      const mask = buildVanishMask(edge.id, mySegs, myLength, edge.from, edge.to, graph.nodes, otherEdges, defs)
+      const otherEdges = allEntries.filter(e => e.id !== edge.id)
+      const mask = buildVanishMask(edge.id, mySegs, myLength, edge.from, edge.to, getGrid(), otherEdges, defs)
       if (mask) {
         defs.appendChild(mask)
         path.setAttribute('mask', `url(#vm-${edge.id})`)
@@ -169,15 +280,27 @@ export function addInteraction(
     return path
   }
 
-  // Grab hand: a closed fist — rounded palm with four knuckle bumps on top.
+  // Open hand (the standard "grab" cursor): four rounded fingers over a palm.
   function makeGrabHandIcon(): SVGElement {
-    const path = svgEl('path')
-    path.setAttribute('d',
-      'M -4.6 1 L -4.6 -1.8 A 1.15 1.15 0 0 1 -2.3 -1.8 L -2.3 -3.2 ' +
-      'A 1.15 1.15 0 0 1 0 -3.2 L 0 -3.8 A 1.15 1.15 0 0 1 2.3 -3.8 ' +
-      'L 2.3 -2.6 A 1.15 1.15 0 0 1 4.6 -2.6 L 4.6 2 ' +
-      'Q 4.6 5.5 1 5.5 L -1.4 5.5 Q -4.6 5.5 -4.6 1 Z')
-    return path
+    const g = svgEl('g')
+    const fingers: Array<[cx: number, top: number]> = [[-3.6, -5.2], [-1.2, -6.2], [1.2, -5.8], [3.6, -4.4]]
+    for (const [cx, top] of fingers) {
+      const f = svgEl('rect')
+      f.setAttribute('x', String(cx - 1.1))
+      f.setAttribute('y', String(top))
+      f.setAttribute('width', '2.2')
+      f.setAttribute('height', String(2 - top))
+      f.setAttribute('rx', '1.1')
+      g.appendChild(f)
+    }
+    const palm = svgEl('rect')
+    palm.setAttribute('x', '-4.7')
+    palm.setAttribute('y', '-1.5')
+    palm.setAttribute('width', '9.4')
+    palm.setAttribute('height', '7.5')
+    palm.setAttribute('rx', '3')
+    g.appendChild(palm)
+    return g
   }
 
   // ── Elbow2 middle-segment drag ─────────────────────────────────────────────
@@ -200,7 +323,7 @@ export function addInteraction(
   let lastMidDragEnd = 0
 
   function startMidDrag(edge: Edge, btn: SVGGElement, e: MouseEvent): void {
-    const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, obstaclesFor(edge.from, edge.to), edgeMidOverride(edge))
+    const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, getGrid(), edgeMidOverride(edge), edge.from, edge.to)
     if (geo.segments.length !== 3) return
     const mid = geo.segments[1]
     // A vertical middle segment moves along x; a horizontal one along y.
@@ -287,17 +410,15 @@ export function addInteraction(
   // use applyEdgePatch so the change is recorded.
   function setEdgeSettings(edge: Edge, patch: EdgeSettingsPatch, persist = true): void {
     Object.assign(edge, patch)
-    const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
+    const path = pathById.get(edge.id)
     if (!path) return
-    const fromPos = getNodePos(edge.from)
-    const toPos = getNodePos(edge.to)
-    const geo = computeEdgeGeometry(fromPos, toPos, edge.routing, obstaclesFor(edge.from, edge.to), edgeMidOverride(edge))
+    const geo = computeEdgeGeometry(getNodePos(edge.from), getNodePos(edge.to), edge.routing, getGrid(), edgeMidOverride(edge), edge.from, edge.to)
     path.setAttribute('d', displayPathFromSegments(geo.segments))
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
     path.setAttribute('stroke-dasharray', edge.style === 'dashed' ? '6 4' : '')
     if (persist) api.patchEdge(edge.id, patch).catch(console.error)
-    rebuildAllVanish()
+    requestLayout()
   }
 
   function applyEdgePatch(edge: Edge, patch: EdgeSettingsPatch): void {
@@ -322,7 +443,6 @@ export function addInteraction(
     type Item = {
       icon: string | SVGElement
       color: string
-      r?: number
       fontSize?: number
       baseStroke?: string
       setup?: (btn: SVGGElement) => void
@@ -368,7 +488,7 @@ export function addInteraction(
       edgeClipboard = { routing: edge.routing, style: edge.style, vanish: edge.vanish }
       updateIconClusters()
     }})
-    items.push({ icon: '⚙', color: '#f97316', r: 14, fontSize: 26, fn: (e) => {
+    items.push({ icon: '⚙', color: '#f97316', fontSize: 20, fn: (e) => {
       e.stopPropagation()
       const sc = vpToScreen(midVpX, midVpY)
       clearIconClusters()
@@ -394,8 +514,8 @@ export function addInteraction(
     const n = items.length
     const ringR = n > 1 ? Math.max(18, spacing / (2 * Math.sin(Math.PI / n))) : 0
     for (let i = 0; i < n; i++) {
-      const { icon, color, r, fontSize, baseStroke, setup, fn } = items[i]
-      const btn = svgIconBtn(icon, color, fn, { r, fontSize, baseStroke })
+      const { icon, color, fontSize, baseStroke, setup, fn } = items[i]
+      const btn = svgIconBtn(icon, color, fn, { fontSize, baseStroke })
       const angle = -Math.PI / 2 + (i * 2 * Math.PI) / n
       btn.setAttribute('transform', `translate(${ringR * Math.cos(angle)},${ringR * Math.sin(angle)})`)
       setup?.(btn)
@@ -410,13 +530,12 @@ export function addInteraction(
     if (!authenticated || selectedNodes.size === 0) return
     if (isEdgeDialogOpen()) return
 
-    for (const path of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
+    for (const [edgeId, path] of pathById) {
       const fromId = path.dataset.from!
       const toId = path.dataset.to!
       if (!selectedNodes.has(fromId) && !selectedNodes.has(toId)) continue
 
-      const edgeId = path.dataset.edgeId!
-      const edge = graph.edges.find(e => e.id === edgeId)
+      const edge = edgeById.get(edgeId)
       if (!edge) continue
 
       const midVpX = Number(path.dataset.midX)
@@ -471,7 +590,7 @@ export function addInteraction(
 
     const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
     for (const node of graph.nodes) {
-      const g = viewport.querySelector<SVGGElement>(`[data-node-id="${node.id}"]`)
+      const g = nodeElById.get(node.id)
       if (!g) continue
       const rect = nodeRect(g)
       if (selectedNodes.has(node.id)) {
@@ -496,7 +615,7 @@ export function addInteraction(
     }
 
     const hasSelection = selectedNodes.size > 0
-    for (const path of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
+    for (const path of pathById.values()) {
       const hl = hasSelection && (selectedNodes.has(path.dataset.from!) || selectedNodes.has(path.dataset.to!))
       // Default edges are colour-coded by the state of their origin node; a
       // selection-highlighted edge brightens to white to stand out.
@@ -521,39 +640,25 @@ export function addInteraction(
 
   // ── Edge helpers ───────────────────────────────────────────────────────────
 
-  function getNodePos(id: string): { x: number; y: number; hh: number } {
-    const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
-    return { x: Number(g.dataset.cx), y: Number(g.dataset.cy), hh: Number(g.dataset.hh) || NODE_HH }
-  }
-
-  // Nodes an elbow edge should try to route around — every node except the two
-  // it connects. Live positions are read from the DOM so this stays correct
-  // mid-drag.
-  function obstaclesFor(fromId: string, toId: string): Node[] {
-    return graph.nodes.filter(n => n.id !== fromId && n.id !== toId).map(n => {
-      const g = viewport.querySelector<SVGGElement>(`[data-node-id="${n.id}"]`)
-      return g ? { ...n, x: Number(g.dataset.cx), y: Number(g.dataset.cy) } : n
-    })
-  }
-
+  // Tier-A local update: re-route a single edge from live positions. Used per
+  // drag frame for the dragged node's edges only — the rest of the graph keeps
+  // its last stacked geometry until the async pass lands.
   function refreshEdgePath(path: SVGPathElement): void {
     const fromId = path.dataset.from!
     const toId = path.dataset.to!
-    const from = getNodePos(fromId)
-    const to = getNodePos(toId)
-    const edgeId = path.dataset.edgeId
-    const edge = edgeId ? graph.edges.find(e => e.id === edgeId) : undefined
-    const geo = computeEdgeGeometry(from, to, edge?.routing ?? 'straight', obstaclesFor(fromId, toId), edgeMidOverride(edge))
+    const edge = path.dataset.edgeId ? edgeById.get(path.dataset.edgeId) : undefined
+    const geo = computeEdgeGeometry(getNodePos(fromId), getNodePos(toId), edge?.routing ?? 'straight', getGrid(), edgeMidOverride(edge), fromId, toId)
     path.setAttribute('d', displayPathFromSegments(geo.segments))
     path.dataset.midX = String(geo.midX)
     path.dataset.midY = String(geo.midY)
   }
 
   function updateEdgesForNode(nodeId: string): void {
-    for (const path of viewport.querySelectorAll<SVGPathElement>('[data-from]')) {
-      if (path.dataset.from === nodeId || path.dataset.to === nodeId) {
-        refreshEdgePath(path)
-      }
+    const ids = edgesByNode.get(nodeId)
+    if (!ids) return
+    for (const id of ids) {
+      const path = pathById.get(id)
+      if (path) refreshEdgePath(path)
     }
   }
 
@@ -563,49 +668,59 @@ export function addInteraction(
     if (graph.nodes.some(n => n.id === node.id)) return
     graph.nodes.push(node)
     const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
-    viewport.appendChild(
-      makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap)),
-    )
+    const el = makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap))
+    viewport.appendChild(el)
+    nodeElById.set(node.id, el)
+    livePos.set(node.id, { x: node.x, y: node.y, hh: nodeHalfHeight(node.label) })
+    invalidateGrid()
     if (persist) api.upsertNode(node).catch(console.error)
-    rebuildAllVanish()
+    requestLayout()
   }
 
   function internalRemoveNode(id: string, persist = true): void {
     const idx = graph.nodes.findIndex(n => n.id === id)
     if (idx >= 0) graph.nodes.splice(idx, 1)
+    const removedEdges = graph.edges.filter(e => e.from === id || e.to === id)
     graph.edges = graph.edges.filter(e => e.from !== id && e.to !== id)
-    viewport.querySelector(`[data-node-id="${id}"]`)?.remove()
-    viewport.querySelectorAll<SVGPathElement>(`[data-from="${id}"],[data-to="${id}"]`).forEach(p => {
-      const eid = p.dataset.edgeId
-      const defs = getDefs()
-      if (eid && defs) cleanupVanishDefs(eid, defs)
-      p.remove()
-    })
+    nodeElById.get(id)?.remove()
+    nodeElById.delete(id)
+    livePos.delete(id)
+    invalidateGrid()
+    const defs = getDefs()
+    for (const e of removedEdges) {
+      unindexEdge(e)
+      if (defs) cleanupVanishDefs(e.id, defs)
+      pathById.get(e.id)?.remove()
+      pathById.delete(e.id)
+    }
+    edgesByNode.delete(id)
     if (persist) api.deleteNode(id).catch(console.error)
-    rebuildAllVanish()
+    requestLayout()
   }
 
   function internalAddEdge(edge: Edge, persist = true): void {
     if (graph.edges.some(e => e.id === edge.id)) return
-    const fromEl = viewport.querySelector(`[data-node-id="${edge.from}"]`)
-    const toEl = viewport.querySelector(`[data-node-id="${edge.to}"]`)
-    if (!fromEl || !toEl) return
+    if (!nodeElById.has(edge.from) || !nodeElById.has(edge.to)) return
     graph.edges.push(edge)
-    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge, obstaclesFor(edge.from, edge.to), graph.nodes.find(n => n.id === edge.from)?.status)
+    indexEdge(edge)
+    const path = makeEdgePath(getNodePos(edge.from), getNodePos(edge.to), edge.from, edge.to, edge, getGrid(), graph.nodes.find(n => n.id === edge.from)?.status)
     viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
+    pathById.set(edge.id, path)
     if (persist) api.upsertEdge(edge).catch(console.error)
-    rebuildAllVanish()
+    requestLayout()
   }
 
   function internalRemoveEdge(edgeId: string, persist = true): void {
     const idx = graph.edges.findIndex(e => e.id === edgeId)
     if (idx < 0) return
     const [edge] = graph.edges.splice(idx, 1)
+    unindexEdge(edge)
     const defs = getDefs()
     if (defs) cleanupVanishDefs(edge.id, defs)
-    viewport.querySelector(`[data-from="${edge.from}"][data-to="${edge.to}"]`)?.remove()
+    pathById.get(edge.id)?.remove()
+    pathById.delete(edge.id)
     if (persist) api.deleteEdge(edge.id).catch(console.error)
-    rebuildAllVanish()
+    requestLayout()
   }
 
   function internalMoveNode(id: string, pos: { x: number; y: number }, persist = true): void {
@@ -614,12 +729,15 @@ export function addInteraction(
     if (node.x !== pos.x || node.y !== pos.y) clearMidOverridesForNode(id)
     node.x = pos.x
     node.y = pos.y
-    const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
+    const p = getNodePos(id)
+    p.x = pos.x
+    p.y = pos.y
+    invalidateGrid()
+    const g = nodeElById.get(id)
     if (g) {
-      const hh = Number(g.dataset.hh) || NODE_HH
       g.dataset.cx = String(pos.x)
       g.dataset.cy = String(pos.y)
-      g.setAttribute('transform', `translate(${pos.x - 60},${pos.y - hh})`)
+      g.setAttribute('transform', `translate(${pos.x - NODE_HW},${pos.y - p.hh})`)
       updateEdgesForNode(id)
     }
     if (persist) api.upsertNode(node).catch(console.error)
@@ -629,14 +747,18 @@ export function addInteraction(
   // label, then refresh the edges that touch it. Selection styling is restored
   // by the caller's refreshHighlights().
   function rerenderNode(id: string): void {
-    const old = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
+    const old = nodeElById.get(id)
     const node = graph.nodes.find(n => n.id === id)
     if (!old || !node) return
     const nodeMap = new Map(graph.nodes.map(n => [n.id, n]))
     const fresh = makeNodeEl(node, nodeBorderColor(node, graph.edges, nodeMap), nodeIsReady(node, graph.edges, nodeMap))
     old.replaceWith(fresh)
+    nodeElById.set(id, fresh)
+    const p = getNodePos(id)
+    p.hh = nodeHalfHeight(node.label)
+    invalidateGrid()
     updateEdgesForNode(id)
-    rebuildAllVanish()
+    requestLayout()
   }
 
   function internalUpdateNode(
@@ -653,7 +775,7 @@ export function addInteraction(
     }
     if (patch.status !== undefined) refreshHighlights()
     if ('nodeClass' in patch) {
-      const rectEl = viewport.querySelector<SVGRectElement>(`[data-node-id="${id}"] rect`)
+      const rectEl = nodeElById.get(id)?.querySelector('rect')
       if (rectEl) rectEl.setAttribute('fill', nodeClassFill(node.nodeClass))
     }
     if (persist) api.upsertNode(node).catch(console.error)
@@ -665,20 +787,24 @@ export function addInteraction(
     const existingIdx = graph.edges.findIndex(e => e.from === fromId && e.to === toId)
     if (existingIdx >= 0) {
       const [removed] = graph.edges.splice(existingIdx, 1)
+      unindexEdge(removed)
       const defs = getDefs()
       if (defs) cleanupVanishDefs(removed.id, defs)
-      viewport.querySelector(`[data-from="${fromId}"][data-to="${toId}"]`)?.remove()
+      pathById.get(removed.id)?.remove()
+      pathById.delete(removed.id)
       api.deleteEdge(removed.id).catch(console.error)
       record({ type: 'delete-edge', edge: { ...removed } })
     } else {
       const edge: Edge = { id: `${fromId}-${toId}`, from: fromId, to: toId, routing: 'straight', style: 'solid', vanish: false }
       graph.edges.push(edge)
-      const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId, edge, [], graph.nodes.find(n => n.id === fromId)?.status)
+      indexEdge(edge)
+      const path = makeEdgePath(getNodePos(fromId), getNodePos(toId), fromId, toId, edge, getGrid(), graph.nodes.find(n => n.id === fromId)?.status)
       viewport.insertBefore(path, viewport.querySelector<SVGGElement>('[data-node-id]'))
+      pathById.set(edge.id, path)
       api.upsertEdge(edge).catch(console.error)
       record({ type: 'create-edge', edge: { ...edge } })
     }
-    rebuildAllVanish()
+    requestLayout()
     refreshHighlights()
   }
 
@@ -719,7 +845,7 @@ export function addInteraction(
         }
         if (updated.status !== undefined) refreshHighlights()
         if ('nodeClass' in updated) {
-          const rectEl = viewport.querySelector<SVGRectElement>(`[data-node-id="${id}"] rect`)
+          const rectEl = nodeElById.get(id)?.querySelector('rect')
           if (rectEl) rectEl.setAttribute('fill', nodeClassFill(node.nodeClass))
         }
         api.upsertNode(node).catch(console.error)
@@ -816,7 +942,7 @@ export function addInteraction(
     }))
     for (const m of moves) internalMoveNode(m.id, m.to)
     record({ type: 'move-nodes', moves })
-    rebuildAllVanish()
+    requestLayout()
   }
 
   // Distribute the selected nodes so their spacing along `axis` is perfectly
@@ -841,7 +967,7 @@ export function addInteraction(
     if (moves.length === 0) return
     for (const m of moves) internalMoveNode(m.id, m.to)
     record({ type: 'move-nodes', moves })
-    rebuildAllVanish()
+    requestLayout()
   }
 
   alignPanel.appendChild(makeAlignBtn('Align along horizontal axis', () => performAlign('y')))
@@ -901,7 +1027,7 @@ export function addInteraction(
         break
       case 'move-nodes':
         for (const m of entry.moves) internalMoveNode(m.id, dir === 'undo' ? m.from : m.to)
-        rebuildAllVanish()
+        requestLayout()
         break
       case 'rename-node':
         internalUpdateNode(entry.id, { label: dir === 'undo' ? entry.from : entry.to })
@@ -924,7 +1050,7 @@ export function addInteraction(
         else internalRemoveEdge(entry.edge.id)
         break
       case 'settings-edge': {
-        const edge = graph.edges.find(e => e.id === entry.id)
+        const edge = edgeById.get(entry.id)
         if (edge) setEdgeSettings(edge, dir === 'undo' ? entry.from : entry.to)
         break
       }
@@ -960,7 +1086,10 @@ export function addInteraction(
   // first then re-adding it yields the correct result. Selection/pan/zoom and any
   // unsaved panel edits are left untouched.
   function applyRemoteChanges(changes: GraphChanges): boolean {
-    if (activeNode) return false
+    // Defer while any interaction is live — a node or middle-segment drag, a
+    // pan, a box select, a pending click-to-add, or an open edge dialog.
+    if (activeNode || midDrag || panning || boxSelecting) return false
+    if (pendingAddPos || pendingCtrlAddPos || isEdgeDialogOpen()) return false
     if (changes.nodes.length === 0 && changes.edges.length === 0 && changes.deletions.length === 0) return true
 
     for (const d of changes.deletions) {
@@ -985,7 +1114,7 @@ export function addInteraction(
     }
 
     for (const edge of changes.edges) {
-      const existing = graph.edges.find(e => e.id === edge.id)
+      const existing = edgeById.get(edge.id)
       if (!existing) { internalAddEdge(edge, false); continue }
       const patch: EdgeSettingsPatch = {}
       if (existing.routing !== edge.routing) patch.routing = edge.routing
@@ -997,6 +1126,7 @@ export function addInteraction(
     }
 
     refreshHighlights()
+    requestLayout()
     return true
   }
 
@@ -1017,7 +1147,7 @@ export function addInteraction(
   }
 
   function centerOnNode(id: string): void {
-    const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)
+    const g = nodeElById.get(id)
     if (!g) return
     const nodeCx = Number(g.dataset.cx)
     const nodeCy = Number(g.dataset.cy)
@@ -1067,6 +1197,112 @@ export function addInteraction(
   let boxVpStart = { x: 0, y: 0 }
   let boxEl: SVGRectElement | null = null
 
+  // ── Drag frame batching ───────────────────────────────────────────────────
+  // Mousemove during a node/mid-segment drag only records the pointer; the
+  // actual position updates and edge re-routes run once per animation frame.
+  let dragFrame: number | null = null
+  let lastDragClient: { x: number; y: number } | null = null
+  let lastDragLayoutAt = 0
+
+  function scheduleDragFrame(e: MouseEvent): void {
+    lastDragClient = { x: e.clientX, y: e.clientY }
+    if (dragFrame === null) dragFrame = requestAnimationFrame(processDragFrame)
+  }
+
+  // Run a pending drag frame immediately (mouseup must see final positions).
+  function flushDragFrame(): void {
+    if (dragFrame !== null) {
+      cancelAnimationFrame(dragFrame)
+      processDragFrame()
+    }
+  }
+
+  // Throttled mid-drag layout request: lets neighbouring stacks adjust locally
+  // while the drag is live. Results are async and superseded, and applyLayout
+  // leaves the dragged edges to the local per-frame pass.
+  function maybeRequestDragLayout(): void {
+    const now = performance.now()
+    if (now - lastDragLayoutAt >= DRAG_LAYOUT_INTERVAL_MS) {
+      lastDragLayoutAt = now
+      requestLayout()
+    }
+  }
+
+  function moveDraggedNode(id: string, originCx: number, originCy: number, dx: number, dy: number): void {
+    const g = nodeElById.get(id)
+    if (!g) return
+    const p = getNodePos(id)
+    p.x = originCx + dx / state.scale
+    p.y = originCy + dy / state.scale
+    g.dataset.cx = String(p.x)
+    g.dataset.cy = String(p.y)
+    g.setAttribute('transform', `translate(${p.x - NODE_HW},${p.y - p.hh})`)
+  }
+
+  function processDragFrame(): void {
+    dragFrame = null
+    if (!lastDragClient) return
+    const { x: clientX, y: clientY } = lastDragClient
+
+    if (midDrag) {
+      const d = midDrag.axis === 'x'
+        ? clientX - midDrag.startClient.x
+        : clientY - midDrag.startClient.y
+      if (!midDrag.moved && Math.abs(d) > DRAG_THRESHOLD) {
+        midDrag.moved = true
+        midDrag.btn.querySelector('circle')?.setAttribute('stroke', SELECTED_STROKE)
+        midDrag.btn.style.cursor = 'grabbing'
+      }
+      if (midDrag.moved) {
+        const edge = midDrag.edge
+        edge.midAxis = midDrag.axis
+        edge.midPos = midDrag.startPos + d / state.scale
+        const path = pathById.get(edge.id)
+        if (path) {
+          refreshEdgePath(path)
+          // Keep the icon cluster riding on the segment as it moves.
+          const cluster = iconClusters.find(c => c.edgeId === edge.id)
+          if (cluster) {
+            cluster.midVpX = Number(path.dataset.midX)
+            cluster.midVpY = Number(path.dataset.midY)
+            positionIconClusters()
+          }
+        }
+        maybeRequestDragLayout()
+      }
+      return
+    }
+
+    if (activeNode) {
+      const dx = clientX - dragClientStart.x
+      const dy = clientY - dragClientStart.y
+      if (!hasDragged && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        if (!authenticated) return
+        hasDragged = true
+        activeNode.style.cursor = 'grabbing'
+        // Moving a node resets any manual middle-segment placement on its
+        // edges; the server clears the persisted values when the move lands.
+        if (isMultiDrag) for (const id of multiDragOrigins.keys()) clearMidOverridesForNode(id)
+        else clearMidOverridesForNode(activeNode.dataset.nodeId!)
+      }
+      if (hasDragged) {
+        if (isMultiDrag) {
+          for (const [id, origin] of multiDragOrigins) {
+            moveDraggedNode(id, origin.cx, origin.cy, dx, dy)
+          }
+          invalidateGrid()
+          for (const id of multiDragOrigins.keys()) updateEdgesForNode(id)
+        } else {
+          const id = activeNode.dataset.nodeId!
+          moveDraggedNode(id, singleDragOrigin.cx, singleDragOrigin.cy, dx, dy)
+          invalidateGrid()
+          updateEdgesForNode(id)
+        }
+        maybeRequestDragLayout()
+      }
+    }
+  }
+
   // ── Event handlers ────────────────────────────────────────────────────────
 
   svg.addEventListener('mousedown', (e: Event) => {
@@ -1079,16 +1315,18 @@ export function addInteraction(
       setAddMode(false)
       activeNode = nodeG
       hasDragged = false
+      lastDragClient = null
       dragClientStart = { x: me.clientX, y: me.clientY }
-      singleDragOrigin = { cx: Number(nodeG.dataset.cx), cy: Number(nodeG.dataset.cy) }
+      const startPos = getNodePos(nodeG.dataset.nodeId!)
+      singleDragOrigin = { cx: startPos.x, cy: startPos.y }
 
       const nodeId = nodeG.dataset.nodeId!
       if (authenticated && selectedNodes.size > 1 && selectedNodes.has(nodeId)) {
         isMultiDrag = true
         multiDragOrigins.clear()
         for (const id of selectedNodes) {
-          const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
-          multiDragOrigins.set(id, { cx: Number(g.dataset.cx), cy: Number(g.dataset.cy) })
+          const p = getNodePos(id)
+          multiDragOrigins.set(id, { cx: p.x, cy: p.y })
         }
       } else {
         isMultiDrag = false
@@ -1128,68 +1366,8 @@ export function addInteraction(
   })
 
   window.addEventListener('mousemove', (e: MouseEvent) => {
-    if (midDrag) {
-      const d = midDrag.axis === 'x'
-        ? e.clientX - midDrag.startClient.x
-        : e.clientY - midDrag.startClient.y
-      if (!midDrag.moved && Math.abs(d) > DRAG_THRESHOLD) {
-        midDrag.moved = true
-        midDrag.btn.querySelector('circle')?.setAttribute('stroke', SELECTED_STROKE)
-        midDrag.btn.style.cursor = 'grabbing'
-      }
-      if (midDrag.moved) {
-        const edge = midDrag.edge
-        edge.midAxis = midDrag.axis
-        edge.midPos = midDrag.startPos + d / state.scale
-        const path = viewport.querySelector<SVGPathElement>(`[data-from="${edge.from}"][data-to="${edge.to}"]`)
-        if (path) {
-          refreshEdgePath(path)
-          // Keep the icon cluster riding on the segment as it moves.
-          const cluster = iconClusters.find(c => c.edgeId === edge.id)
-          if (cluster) {
-            cluster.midVpX = Number(path.dataset.midX)
-            cluster.midVpY = Number(path.dataset.midY)
-            positionIconClusters()
-          }
-        }
-      }
-      return
-    }
-
-    if (activeNode) {
-      const dx = e.clientX - dragClientStart.x
-      const dy = e.clientY - dragClientStart.y
-      if (!hasDragged && Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
-        if (!authenticated) return
-        hasDragged = true
-        activeNode.style.cursor = 'grabbing'
-        // Moving a node resets any manual middle-segment placement on its
-        // edges; the server clears the persisted values when the move lands.
-        if (isMultiDrag) for (const id of multiDragOrigins.keys()) clearMidOverridesForNode(id)
-        else clearMidOverridesForNode(activeNode.dataset.nodeId!)
-      }
-      if (hasDragged) {
-        if (isMultiDrag) {
-          for (const [id, origin] of multiDragOrigins) {
-            const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
-            const hh = Number(g.dataset.hh) || NODE_HH
-            const cx = origin.cx + dx / state.scale
-            const cy = origin.cy + dy / state.scale
-            g.dataset.cx = String(cx)
-            g.dataset.cy = String(cy)
-            g.setAttribute('transform', `translate(${cx - 60},${cy - hh})`)
-            updateEdgesForNode(id)
-          }
-        } else {
-          const hh = Number(activeNode.dataset.hh) || NODE_HH
-          const cx = singleDragOrigin.cx + dx / state.scale
-          const cy = singleDragOrigin.cy + dy / state.scale
-          activeNode.dataset.cx = String(cx)
-          activeNode.dataset.cy = String(cy)
-          activeNode.setAttribute('transform', `translate(${cx - 60},${cy - hh})`)
-          updateEdgesForNode(activeNode.dataset.nodeId!)
-        }
-      }
+    if (midDrag || activeNode) {
+      scheduleDragFrame(e)
       return
     }
 
@@ -1213,6 +1391,7 @@ export function addInteraction(
 
   window.addEventListener('mouseup', (e: MouseEvent) => {
     if (midDrag) {
+      flushDragFrame()
       const { edge, before, moved } = midDrag
       midDrag = null
       if (moved) {
@@ -1230,44 +1409,49 @@ export function addInteraction(
     }
 
     if (activeNode) {
+      flushDragFrame()
       if (hasDragged) {
         const moved = isMultiDrag ? [...multiDragOrigins.keys()] : [activeNode.dataset.nodeId!]
         const moveRecords: Array<{ id: string; from: { x: number; y: number }; to: { x: number; y: number } }> = []
         for (const id of moved) {
-          const g = viewport.querySelector<SVGGElement>(`[data-node-id="${id}"]`)!
           const node = graph.nodes.find(n => n.id === id)
           if (node) {
+            const p = getNodePos(id)
             const origin = isMultiDrag ? multiDragOrigins.get(id)! : singleDragOrigin
-            moveRecords.push({ id, from: { x: origin.cx, y: origin.cy }, to: { x: Number(g.dataset.cx), y: Number(g.dataset.cy) } })
-            node.x = Number(g.dataset.cx)
-            node.y = Number(g.dataset.cy)
+            moveRecords.push({ id, from: { x: origin.cx, y: origin.cy }, to: { x: p.x, y: p.y } })
+            node.x = p.x
+            node.y = p.y
             api.upsertNode(node).catch(console.error)
           }
         }
         if (moveRecords.length > 0) record({ type: 'move-nodes', moves: moveRecords })
-        // Rebuild vanish masks now that node positions have settled
-        rebuildAllVanish()
-      } else {
-        const nodeId = activeNode.dataset.nodeId!
-        if (authenticated && e.ctrlKey) {
-          if (selectedNodes.size === 1 && !selectedNodes.has(nodeId)) {
-            toggleEdge([...selectedNodes][0], nodeId)
-          }
-        } else if (e.shiftKey) {
-          if (selectedNodes.has(nodeId)) selectedNodes.delete(nodeId)
-          else selectedNodes.add(nodeId)
-          refreshHighlights()
-        } else {
-          clearSelection()
-          selectNode(nodeId)
-          const node = graph.nodes.find(n => n.id === nodeId)!
-          openPanel(node)
-        }
       }
+      const wasDrag = hasDragged
       activeNode.style.cursor = 'grab'
+      const releasedNodeId = activeNode.dataset.nodeId!
       activeNode = null
       isMultiDrag = false
       hasDragged = false
+      if (wasDrag) {
+        // Positions settled: run the authoritative async pass (and, when it
+        // lands, the vanish masks).
+        requestLayout()
+        return
+      }
+      if (authenticated && e.ctrlKey) {
+        if (selectedNodes.size === 1 && !selectedNodes.has(releasedNodeId)) {
+          toggleEdge([...selectedNodes][0], releasedNodeId)
+        }
+      } else if (e.shiftKey) {
+        if (selectedNodes.has(releasedNodeId)) selectedNodes.delete(releasedNodeId)
+        else selectedNodes.add(releasedNodeId)
+        refreshHighlights()
+      } else {
+        clearSelection()
+        selectNode(releasedNodeId)
+        const node = graph.nodes.find(n => n.id === releasedNodeId)!
+        openPanel(node)
+      }
       return
     }
 
@@ -1298,11 +1482,11 @@ export function addInteraction(
         const x2 = x1 + Number(boxEl.getAttribute('width'))
         const y2 = y1 + Number(boxEl.getAttribute('height'))
         selectedNodes.clear()
-        for (const g of viewport.querySelectorAll<SVGGElement>('[data-node-id]')) {
+        for (const [id, g] of nodeElById) {
           const cx = Number(g.dataset.cx)
           const cy = Number(g.dataset.cy)
           if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
-            selectedNodes.add(g.dataset.nodeId!)
+            selectedNodes.add(id)
           }
         }
         refreshHighlights()
@@ -1341,9 +1525,9 @@ export function addInteraction(
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
       for (const n of graph.nodes) {
         const hh = nodeHalfHeight(n.label)
-        minX = Math.min(minX, n.x - 60)
+        minX = Math.min(minX, n.x - NODE_HW)
         minY = Math.min(minY, n.y - hh)
-        maxX = Math.max(maxX, n.x + 60)
+        maxX = Math.max(maxX, n.x + NODE_HW)
         maxY = Math.max(maxY, n.y + hh)
       }
       const graphW = maxX - minX
@@ -1359,7 +1543,7 @@ export function addInteraction(
       state.tx = svgRect.width / 2 - cx * state.scale
       state.ty = svgRect.height / 2 - cy * state.scale
       applyTransform()
-      rebuildAllVanish()
+      requestLayout()
     })
   }
 

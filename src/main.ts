@@ -166,12 +166,27 @@ async function handleOAuthCallback(): Promise<void> {
 // ── Live refresh ────────────────────────────────────────────────────────────────
 // Poll the worker for changes so concurrent edits by other users surface here.
 // We only pull rows newer than our known revision, and apply them as a diff;
-// _rev is advanced only when the diff is actually applied (the apply defers while
-// the user is mid-drag), so a deferred tick simply retries next time.
-// The timer resets on every local write so we don't poll right after persisting.
+// _rev is advanced only when the diff is actually applied, so a deferred tick
+// simply retries next time.
+//
+// A refresh is only allowed when the user is completely idle: no input of any
+// kind (mouse, keyboard, wheel, touch) for IDLE_MS, and no DB write still in
+// flight. Anything else defers the tick — applying remote diffs mid-interaction
+// or mid-write is what caused unreliable behaviour.
 
 const REFRESH_INTERVAL_MS = 3000
+const IDLE_MS = 2000
 let _pollTimer: ReturnType<typeof window.setTimeout> | undefined
+let _lastInput = Date.now()
+let _pendingWrites = 0
+
+for (const evt of ['mousedown', 'mousemove', 'mouseup', 'wheel', 'keydown', 'touchstart', 'touchmove', 'pointerdown'] as const) {
+  window.addEventListener(evt, () => { _lastInput = Date.now() }, { capture: true, passive: true })
+}
+
+function userIsIdle(): boolean {
+  return _pendingWrites === 0 && Date.now() - _lastInput >= IDLE_MS
+}
 
 function resetPollTimer(): void {
   if (_pollTimer !== undefined) window.clearTimeout(_pollTimer)
@@ -182,8 +197,14 @@ function resetPollTimer(): void {
 
 function wrapWrite<T extends (...args: never[]) => Promise<void>>(fn: T): T {
   return (async (...args: Parameters<T>) => {
+    _pendingWrites++
     resetPollTimer()
-    await fn(...args)
+    try {
+      await fn(...args)
+    } finally {
+      _pendingWrites--
+      resetPollTimer()
+    }
   }) as T
 }
 
@@ -196,11 +217,14 @@ const graphApi = {
 }
 
 async function pollChanges(): Promise<void> {
-  if (_polling || !_controls || document.hidden) return
+  if (_polling || !_controls || document.hidden || !userIsIdle()) return
   _polling = true
   try {
     const changes = await fetchChanges(_rev)
     if (changes.rev === _rev) return
+    // Input or a write may have started while the fetch was in flight —
+    // re-check before touching the local model; the next tick retries.
+    if (!userIsIdle()) return
     if (_controls.applyRemoteChanges(changes)) _rev = changes.rev
   } catch (err) {
     console.error('refresh failed', err)
