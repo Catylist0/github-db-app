@@ -112,6 +112,15 @@ function updateAuthBar(): void {
     }),
   )
 
+  const copyBtn = iconBtn('{}', 'Copy graph as JSON', () => {
+    if (!_graph) return
+    void navigator.clipboard.writeText(JSON.stringify(_graph, null, 2)).then(() => {
+      copyBtn.textContent = '✓'
+      setTimeout(() => { copyBtn.textContent = '{}' }, 1500)
+    })
+  })
+  items.push(copyBtn)
+
   // Last item gets the closing right border
   items[items.length - 1].style.borderRight = '1px solid var(--border)'
 
