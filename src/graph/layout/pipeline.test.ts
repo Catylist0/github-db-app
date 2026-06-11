@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import testdata from '../../../data/testdata.json'
+import testdata from './fixtures/testdata.json'
 import { layoutEdges, createLayoutCache } from './pipeline'
 import { segIntersectT } from './route'
 import type { LayoutInput, NodeSnap, EdgeSnap, Seg } from './types'
