@@ -1,7 +1,60 @@
 import { describe, it, expect } from 'vitest'
+import testdata from '../../../data/testdata.json'
 import { layoutEdges, createLayoutCache } from './pipeline'
 import { segIntersectT } from './route'
 import type { LayoutInput, NodeSnap, EdgeSnap, Seg } from './types'
+
+// --- helpers shared by real-graph tests ---
+
+// Interior-only crossing: excludes near-endpoint touches (shared node attachments)
+// that are not visible crossings.
+const EPS = 0.02
+function interiorCross(sa: Seg, sb: Seg): boolean {
+  const t = segIntersectT(sa.x1, sa.y1, sa.x2, sa.y2, sb.x1, sb.y1, sb.x2, sb.y2)
+  if (t === null) return false
+  const d1x = sa.x2 - sa.x1, d1y = sa.y2 - sa.y1
+  const d2x = sb.x2 - sb.x1, d2y = sb.y2 - sb.y1
+  const cross2 = d1x * d2y - d1y * d2x
+  const dx = sb.x1 - sa.x1, dy = sb.y1 - sa.y1
+  const s = (dx * d1y - dy * d1x) / cross2
+  return t > EPS && t < 1 - EPS && s > EPS && s < 1 - EPS
+}
+
+interface CrossingReport {
+  edgeA: string
+  edgeB: string
+  labelA: string
+  labelB: string
+  segA: number
+  segB: number
+}
+
+function findCrossings(
+  result: ReturnType<typeof layoutEdges>,
+  labels: Record<string, string>,
+): CrossingReport[] {
+  const ids = Object.keys(result.edges)
+  const reports: CrossingReport[] = []
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const a = result.edges[ids[i]].segments
+      const b = result.edges[ids[j]].segments
+      for (let si = 0; si < a.length; si++) {
+        for (let sj = 0; sj < b.length; sj++) {
+          if (interiorCross(a[si], b[sj])) {
+            reports.push({
+              edgeA: ids[i], edgeB: ids[j],
+              labelA: labels[ids[i]] ?? ids[i],
+              labelB: labels[ids[j]] ?? ids[j],
+              segA: si, segB: sj,
+            })
+          }
+        }
+      }
+    }
+  }
+  return reports
+}
 
 function node(id: string, x: number, y: number, hh = 20): NodeSnap {
   return { id, x, y, hh }
@@ -132,6 +185,73 @@ describe('layoutEdges', () => {
     const cold = layoutEdges(input, cache)
     const warm = layoutEdges(input, cache)
     expect(warm).toEqual(cold)
+  })
+
+  // ── Real graph (testdata.json) ────────────────────────────────────────────
+
+  function loadTestData(): { input: LayoutInput; labels: Record<string, string> } {
+    const raw = testdata as unknown as {
+      nodes: Array<{ id: string; label: string; x: number; y: number }>
+      edges: Array<{ id: string; from: string; to: string; routing: string; style?: string; vanish?: boolean; midAxis?: string | null; midPos?: number | null }>
+    }
+    const labels: Record<string, string> = {}
+    // Edge label = "from_label -> to_label"
+    const nodeLabel: Record<string, string> = {}
+    for (const n of raw.nodes) nodeLabel[n.id] = n.label
+    for (const e of raw.edges) labels[e.id] = `${nodeLabel[e.from] ?? e.from} → ${nodeLabel[e.to] ?? e.to}`
+    const input: LayoutInput = {
+      nodes: raw.nodes.map(n => ({ id: n.id, x: n.x, y: n.y, hh: 20 } satisfies NodeSnap)),
+      edges: raw.edges.map(e => ({
+        id: e.id,
+        from: e.from,
+        to: e.to,
+        routing: e.routing as EdgeSnap['routing'],
+        midAxis: (e.midAxis ?? null) as EdgeSnap['midAxis'],
+        midPos: e.midPos ?? null,
+      } satisfies EdgeSnap)),
+    }
+    return { input, labels }
+  }
+
+  it('produces zero interior crossings on the real graph (testdata.json)', () => {
+    const { input, labels } = loadTestData()
+    const result = layoutEdges(input)
+    const crossings = findCrossings(result, labels)
+    if (crossings.length > 0) {
+      const msg = crossings
+        .map(c => `  [seg ${c.segA}] ${c.labelA}  ✕  [seg ${c.segB}] ${c.labelB}`)
+        .join('\n')
+      expect.fail(`${crossings.length} crossing(s) found:\n${msg}`)
+    }
+  })
+
+  it('is deterministic across permutations on the real graph (testdata.json)', () => {
+    const { input, labels } = loadTestData()
+    const base = layoutEdges(input)
+    // Run 3 more times with different shuffles and compare
+    const shuffles = [
+      { nodes: [...input.nodes].reverse(), edges: [...input.edges].reverse() },
+      { nodes: [...input.nodes].sort(() => 0.5 - Math.random()), edges: [...input.edges].sort(() => 0.5 - Math.random()) },
+      { nodes: [...input.nodes].sort((a, b) => a.id < b.id ? 1 : -1), edges: [...input.edges].sort((a, b) => a.id < b.id ? 1 : -1) },
+    ]
+    for (const [i, shuffled] of shuffles.entries()) {
+      const r = layoutEdges(shuffled)
+      const diffs: string[] = []
+      for (const e of input.edges) {
+        const ref = base.edges[e.id]
+        const got = r.edges[e.id]
+        if (!ref || !got) continue
+        for (let si = 0; si < Math.max(ref.segments.length, got.segments.length); si++) {
+          const a = ref.segments[si], b = got.segments[si]
+          if (!a || !b) { diffs.push(`${labels[e.id]}: seg ${si} missing`); break }
+          if (Math.abs(a.y1 - b.y1) > 0.01 || Math.abs(a.x1 - b.x1) > 0.01) {
+            diffs.push(`${labels[e.id]}: seg ${si} differs (shuffle ${i})`)
+            break
+          }
+        }
+      }
+      if (diffs.length > 0) expect.fail(`Non-determinism in shuffle ${i}:\n${diffs.slice(0, 20).map(d => '  ' + d).join('\n')}`)
+    }
   })
 
   it('handles a large dense graph quickly', () => {
