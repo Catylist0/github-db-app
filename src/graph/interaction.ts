@@ -34,9 +34,6 @@ import type { HistoryEntry, EdgeSettingsPatch } from '../history/stack'
 
 const DRAG_THRESHOLD = 4
 const SELECTED_STROKE = '#58a6ff'
-// Min interval between mid-drag layout requests. The work is async and results
-// are superseded anyway; this just avoids flooding the worker with snapshots.
-const DRAG_LAYOUT_INTERVAL_MS = 120
 
 export function addInteraction(
   svg: SVGSVGElement,
@@ -207,26 +204,17 @@ export function addInteraction(
     scheduler.request(layoutInput())
   }
 
-  function draggedNodeIdSet(): Set<string> {
-    const ids = new Set<string>()
-    if (activeNode && hasDragged) {
-      if (isMultiDrag) for (const id of multiDragOrigins.keys()) ids.add(id)
-      else ids.add(activeNode.dataset.nodeId!)
-    }
-    return ids
-  }
-
   function applyLayout(result: LayoutResult): void {
     lastLayout = result
-    // Mid-drag results still land (neighbouring stacks adjust locally), but
-    // edges attached to the dragged node — and a mid-segment being dragged —
-    // are owned by the per-frame local pass, which has newer positions.
-    const dragged = draggedNodeIdSet()
+    // Every edge — including those on a node being dragged — takes the stacked
+    // geometry live; the worker re-solves them each drag frame. The only thing
+    // left to the per-frame pass is a mid-segment the user is actively dragging,
+    // whose manual placement the stacked result must not fight.
     const draggedEdgeId = midDrag?.moved ? midDrag.edge.id : null
     for (const edge of graph.edges) {
       const geo = result.edges[edge.id]
       if (!geo) continue
-      if (edge.id === draggedEdgeId || dragged.has(edge.from) || dragged.has(edge.to)) continue
+      if (edge.id === draggedEdgeId) continue
       const path = pathById.get(edge.id)
       if (!path) continue
       const d = displayPathFromSegments(geo.segments)
@@ -1688,7 +1676,6 @@ export function addInteraction(
   // actual position updates and edge re-routes run once per animation frame.
   let dragFrame: number | null = null
   let lastDragClient: { x: number; y: number } | null = null
-  let lastDragLayoutAt = 0
 
   function scheduleDragFrame(e: MouseEvent): void {
     lastDragClient = { x: e.clientX, y: e.clientY }
@@ -1700,17 +1687,6 @@ export function addInteraction(
     if (dragFrame !== null) {
       cancelAnimationFrame(dragFrame)
       processDragFrame()
-    }
-  }
-
-  // Throttled mid-drag layout request: lets neighbouring stacks adjust locally
-  // while the drag is live. Results are async and superseded, and applyLayout
-  // leaves the dragged edges to the local per-frame pass.
-  function maybeRequestDragLayout(): void {
-    const now = performance.now()
-    if (now - lastDragLayoutAt >= DRAG_LAYOUT_INTERVAL_MS) {
-      lastDragLayoutAt = now
-      requestLayout()
     }
   }
 
@@ -1754,7 +1730,7 @@ export function addInteraction(
             positionIconClusters()
           }
         }
-        maybeRequestDragLayout()
+        requestLayout()
       }
       return
     }
@@ -1777,16 +1753,16 @@ export function addInteraction(
             moveDraggedNode(id, origin.cx, origin.cy, dx, dy)
           }
           invalidateGrid()
-          for (const id of multiDragOrigins.keys()) updateEdgesForNode(id)
           updateGroupsForNodes(multiDragOrigins.keys(), { deferUnlocked: true })
         } else {
           const id = activeNode.dataset.nodeId!
           moveDraggedNode(id, singleDragOrigin.cx, singleDragOrigin.cy, dx, dy)
           invalidateGrid()
-          updateEdgesForNode(id)
           updateGroupsForNodes([id], { deferUnlocked: true })
         }
-        maybeRequestDragLayout()
+        // The dragged node's edges now restack live from the worker each frame
+        // instead of falling back to a local single-edge re-route.
+        requestLayout()
       }
     }
   }

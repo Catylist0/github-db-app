@@ -38,8 +38,12 @@ export function assignLadderOffsets(order: SegRec[], nodes: NodeSnapMap, into: M
   const mean = order.reduce((s, m) => s + m.perp, 0) / n
 
   // Tightest node-edge capacity among node-attached members limits the ladder.
+  // Straightened singles are excluded: they are allowed to float out of their
+  // node range (the pipeline unstraightens them afterwards if they no longer
+  // reach), so they must not crush the spacing of the members that stay put.
   let availableSpan = Infinity
   for (const m of order) {
+    if (m.straightSingle) continue
     const r = segPerpRange(m.orient, m.nodeIds, nodes)
     if (r) availableSpan = Math.min(availableSpan, r.hi - r.lo)
   }
@@ -47,7 +51,13 @@ export function assignLadderOffsets(order: SegRec[], nodes: NodeSnapMap, into: M
 
   order.forEach((m, i) => {
     const target = mean + (i - (n - 1) / 2) * spacing
-    // Safety net: keep node-attached endpoint(s) on the node edge(s).
+    // Straightened singles take their ladder slot verbatim; whether they can
+    // still reach their nodes from there is decided (and unstraightened) by the
+    // pipeline. Elbow members are clamped to keep their endpoint on the node.
+    if (m.straightSingle) {
+      into.set(`${m.edgeId}#${m.segIndex}`, target - m.perp)
+      return
+    }
     const r = segPerpRange(m.orient, m.nodeIds, nodes)
     const finalPerp = r ? clamp(target, r.lo, r.hi) : target
     into.set(`${m.edgeId}#${m.segIndex}`, finalPerp - m.perp)

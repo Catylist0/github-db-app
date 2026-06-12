@@ -91,10 +91,16 @@ function sweep(pool: SegRec[]): SegRec[][] {
 
   const clusters: Cluster[] = []
   for (const seg of sorted) {
+    // A straightened single is treated as extending infinitely along its axis,
+    // so it overlaps any lane it is perpendicularly close to and never falls out
+    // of a stack it belongs in. (Its real, finite span is kept on the SegRec for
+    // the ordering phase — only corridor membership sees the infinite extent.)
+    const segLo = seg.straightSingle ? -Infinity : seg.lo
+    const segHi = seg.straightSingle ? Infinity : seg.hi
     const matches: Cluster[] = []
     for (const c of clusters) {
       if (seg.perp - c.maxPerp > proximity(seg, c)) continue
-      const overlap = Math.min(seg.hi, c.hi) - Math.max(seg.lo, c.lo)
+      const overlap = Math.min(segHi, c.hi) - Math.max(segLo, c.lo)
       if (overlap < STACK_MIN_OVERLAP) continue
       matches.push(c)
     }
@@ -115,6 +121,9 @@ function sweep(pool: SegRec[]): SegRec[][] {
     }
     target.members.push(seg)
     target.maxPerp = seg.perp
+    // The cluster's axial envelope tracks the members' real spans, not the
+    // infinite extent used above for the join test — so a straightened line
+    // joins lanes it overlaps without dragging axially-distant segments in.
     target.lo = Math.min(target.lo, seg.lo)
     target.hi = Math.max(target.hi, seg.hi)
     target.hasStraight = target.hasStraight || seg.straightSingle

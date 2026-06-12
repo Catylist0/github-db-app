@@ -7,7 +7,11 @@ import {
   type LayoutInput,
   type LayoutResult,
   type EdgeLayout,
+  type Orient,
   type Seg,
+  type NodeSnap,
+  NODE_HW,
+  segOrient,
   pointsToSegs,
 } from './types'
 import { SpatialGrid } from './grid'
@@ -36,6 +40,29 @@ function isAxisAlignedSeg(s: Seg): boolean {
 }
 
 const r2 = (v: number): number => Math.round(v * 100) / 100
+
+// Perpendicular range over which a straightened single can still touch *both*
+// of its nodes' facing sides: the intersection of the two node spans. A
+// horizontal line must sit at a y inside both nodes' [top, bottom]; a vertical
+// one at an x inside both [left, right]. Used to decide, after stacking, whether
+// the line still reaches its nodes or must be unstraightened.
+function connectablePerpRange(orient: Orient, f: NodeSnap, t: NodeSnap): { lo: number; hi: number } {
+  if (orient === 'H') {
+    return { lo: Math.max(f.y - f.hh, t.y - t.hh), hi: Math.min(f.y + f.hh, t.y + t.hh) }
+  }
+  return { lo: Math.max(f.x - NODE_HW, t.x - NODE_HW), hi: Math.min(f.x + NODE_HW, t.x + NODE_HW) }
+}
+
+// A straightened edge we may have to revert: its lane perp, the range it must
+// stay within to keep reaching both nodes, and the diagonal geometry to fall
+// back to when the stack pushes it out of that range.
+interface StraightenedEdge {
+  orient: Orient
+  perp: number
+  lo: number
+  hi: number
+  diagonal: EdgeLayout
+}
 
 // Everything the bundle's offsets depend on: its members, the full polylines
 // of the member edges (ordering probes them), and the attached node boxes
@@ -72,6 +99,7 @@ export function layoutEdges(input: LayoutInput, cache?: LayoutCache): LayoutResu
   // edges are snapped so they too can stack. Diagonals pass through unchanged.
   const recById = new Map<string, EdgeRec>()
   const segRecs: SegRec[] = []
+  const straightenedEdges = new Map<string, StraightenedEdge>()
   for (const edge of input.edges) {
     const from = nodes.get(edge.from)
     const to = nodes.get(edge.to)
@@ -85,6 +113,19 @@ export function layoutEdges(input: LayoutInput, cache?: LayoutCache): LayoutResu
       if (snapped) { segs = snapped; straightened = true }
     }
     recById.set(edge.id, buildEdgeRec(edge.id, segs))
+
+    if (straightened) {
+      const orient = segOrient(segs[0])
+      const range = connectablePerpRange(orient, from, to)
+      straightenedEdges.set(edge.id, {
+        orient,
+        perp: orient === 'H' ? segs[0].y1 : segs[0].x1,
+        lo: range.lo,
+        hi: range.hi,
+        // Diagonal route to fall back to, straight from one node side to the other.
+        diagonal: { segments: geo.segments, midX: geo.midX, midY: geo.midY },
+      })
+    }
 
     const stackable = segs.length >= 1 && (
       edge.routing !== 'straight' ||
@@ -130,6 +171,20 @@ export function layoutEdges(input: LayoutInput, cache?: LayoutCache): LayoutResu
   for (const edge of input.edges) {
     const rec = recById.get(edge.id)
     if (!rec || rec.points.length < 2) continue
+
+    // Unstraighten step: a straightened line was stacked as if infinite, so its
+    // slot may have drifted past where it can still reach both nodes. If so, drop
+    // back to the diagonal route into the node side rather than leave a line
+    // floating off its node edge.
+    const straight = straightenedEdges.get(edge.id)
+    if (straight) {
+      const finalPerp = straight.perp + (offsets.get(`${edge.id}#0`) ?? 0)
+      if (finalPerp < straight.lo || finalPerp > straight.hi) {
+        out[edge.id] = straight.diagonal
+        continue
+      }
+    }
+
     const pts = reconstructPoints(rec, offsets)
     const segments = pointsToSegs(pts)
     const k = segments.length
