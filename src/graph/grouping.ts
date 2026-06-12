@@ -3,17 +3,15 @@
 // Euler-diagram-style rectilinear outline.
 //
 // The region is the simplest reasonable axis-aligned shape: a padded bounding
-// box around all members, with rectangular cut-outs around non-members. There
-// are no thin corridor arms to individual nodes — extra interior space is
-// acceptable; jagged or spindly boundaries are not. Non-member nodes are
-// carved back out, which can split the region — when that disconnects a member
-// from the main body, the member is reported as an exclave so the caller can
-// drop it from the group entirely (a group can never have an exclave).
+// box around all members, with cut-outs around non-members and non-member-only
+// edges. Each cut-out reaches the outer boundary — internal enclaves (holes) are
+// never emitted. Extra interior space is acceptable; jagged or spindly boundaries
+// are not. Carving can split the region — when that disconnects a member from the
+// main body, the member is reported as an exclave so the caller can drop it from
+// the group entirely (a group can never have an exclave).
 //
 // Nothing here touches the DOM, so it can be unit-tested in node. The result is
-// an SVG path `d` string with only horizontal/vertical edges and rounded
-// corners; interior holes (a non-member fully surrounded by members) are emitted
-// as extra sub-paths and rely on the caller using fill-rule: evenodd.
+// an SVG path `d` string with only horizontal/vertical edges and rounded corners.
 
 export interface GroupRect {
   x: number // centre
@@ -22,15 +20,25 @@ export interface GroupRect {
   hh: number // half height
 }
 
+export interface GroupExcludeSegment {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
 export interface GroupOutlineOptions {
   memberPad?: number // margin grown around each member before the boundary sits
-  excludePad?: number // keep-out margin around each non-member node
+  excludePad?: number // keep-out margin around each non-member node or edge
   corner?: number // corner radius
+  excludeSegments?: GroupExcludeSegment[] // edges whose endpoints are both non-members
 }
 
 const DEFAULTS = { memberPad: 26, excludePad: 16, corner: 14 }
 
 export type Pt = { x: number; y: number }
+
+type BBox = { minX: number; minY: number; maxX: number; maxY: number }
 
 // The computed shape of a group: its rectilinear outline loops plus the indices
 // (into the `members` array passed in) of members that could not be reached
@@ -91,28 +99,47 @@ export function computeGroupShape(
   if (members.length === 0) return { loops: [], excluded: [] }
   const memberPad = options.memberPad ?? DEFAULTS.memberPad
   const excludePad = options.excludePad ?? DEFAULTS.excludePad
+  const excludeSegments = options.excludeSegments ?? []
 
   // Outer envelope: one padded axis-aligned box around every member.
-  let bboxMinX = Infinity, bboxMinY = Infinity, bboxMaxX = -Infinity, bboxMaxY = -Infinity
+  const bbox: BBox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
   for (const m of members) {
-    bboxMinX = Math.min(bboxMinX, m.x - m.hw - memberPad)
-    bboxMinY = Math.min(bboxMinY, m.y - m.hh - memberPad)
-    bboxMaxX = Math.max(bboxMaxX, m.x + m.hw + memberPad)
-    bboxMaxY = Math.max(bboxMaxY, m.y + m.hh + memberPad)
+    bbox.minX = Math.min(bbox.minX, m.x - m.hw - memberPad)
+    bbox.minY = Math.min(bbox.minY, m.y - m.hh - memberPad)
+    bbox.maxX = Math.max(bbox.maxX, m.x + m.hw + memberPad)
+    bbox.maxY = Math.max(bbox.maxY, m.y + m.hh + memberPad)
+  }
+
+  // Cut-outs around obstacles reach the bbox edge so the region never contains
+  // an internal hole — only notches/channels open to the outside.
+  const cutouts: BBox[] = []
+  for (const n of nonMembers) {
+    cutouts.push(...cutoutToEdge({
+      minX: n.x - n.hw - excludePad,
+      maxX: n.x + n.hw + excludePad,
+      minY: n.y - n.hh - excludePad,
+      maxY: n.y + n.hh + excludePad,
+    }, bbox))
+  }
+  for (const seg of excludeSegments) {
+    cutouts.push(...cutoutToEdge(segmentThickenedBBox(seg, excludePad), bbox))
   }
 
   // Build a coordinate-compressed grid: cell boundaries only at meaningful
-  // x/y values (bbox edges, member/non-member rect edges) so the traced outline
-  // has as few vertices as the geometry allows.
+  // x/y values so the traced outline has as few vertices as possible.
   const xs = uniqueSorted([
-    bboxMinX, bboxMaxX,
+    bbox.minX, bbox.maxX,
     ...members.flatMap(m => [m.x - m.hw, m.x + m.hw, m.x - m.hw - memberPad, m.x + m.hw + memberPad]),
     ...nonMembers.flatMap(n => [n.x - n.hw - excludePad, n.x + n.hw + excludePad]),
+    ...cutouts.flatMap(r => [r.minX, r.maxX]),
+    ...excludeSegments.flatMap(s => [s.x1, s.x2]),
   ])
   const ys = uniqueSorted([
-    bboxMinY, bboxMaxY,
+    bbox.minY, bbox.maxY,
     ...members.flatMap(m => [m.y - m.hh, m.y + m.hh, m.y - m.hh - memberPad, m.y + m.hh + memberPad]),
     ...nonMembers.flatMap(n => [n.y - n.hh - excludePad, n.y + n.hh + excludePad]),
+    ...cutouts.flatMap(r => [r.minY, r.maxY]),
+    ...excludeSegments.flatMap(s => [s.y1, s.y2]),
   ])
 
   const cols = xs.length - 1
@@ -123,12 +150,21 @@ export function computeGroupShape(
     Math.abs(px - r.x) <= r.hw + pad && Math.abs(py - r.y) <= r.hh + pad
 
   const inBbox = (px: number, py: number): boolean =>
-    px >= bboxMinX && px <= bboxMaxX && py >= bboxMinY && py <= bboxMaxY
+    px >= bbox.minX && px <= bbox.maxX && py >= bbox.minY && py <= bbox.maxY
+
+  const inCutout = (px: number, py: number): boolean => {
+    for (const r of cutouts) {
+      if (px >= r.minX && px <= r.maxX && py >= r.minY && py <= r.maxY) return true
+    }
+    for (const seg of excludeSegments) {
+      if (pointSegDist(px, py, seg.x1, seg.y1, seg.x2, seg.y2) <= excludePad) return true
+    }
+    return false
+  }
 
   // A cell (sampled at its centre) is inside when it lies in the padded bbox
-  // and is not within excludePad of any non-member — except that a member's own
-  // core rectangle is always kept, so members are never carved out by a
-  // non-member that sits on top of them.
+  // and is not in any cut-out — except that a member's own core rectangle is
+  // always kept, so members are never carved out by a non-member on top of them.
   const inside = (i: number, j: number): boolean => {
     const px = (xs[i] + xs[i + 1]) / 2
     const py = (ys[j] + ys[j + 1]) / 2
@@ -136,9 +172,7 @@ export function computeGroupShape(
       if (inRect(px, py, m, 0)) return true // member core — always in
     }
     if (!inBbox(px, py)) return false
-    for (const n of nonMembers) {
-      if (inRect(px, py, n, excludePad)) return false
-    }
+    if (inCutout(px, py)) return false
     return true
   }
 
@@ -205,9 +239,77 @@ export function computeGroupShape(
   }
 
   return {
-    loops: loops.map(simplifyRectilinear).filter(loop => loop.length >= 3),
+    loops: keepOuterLoops(loops.map(simplifyRectilinear).filter(loop => loop.length >= 3)),
     excluded,
   }
+}
+
+// Extend an obstacle's padded exclude box to the nearest bbox edge with a
+// channel of the same width/height, so the cut-out opens to the boundary.
+function cutoutToEdge(exclude: BBox, bbox: BBox): BBox[] {
+  const channels: Array<{ dist: number; rect: BBox }> = []
+  if (exclude.minX > bbox.minX) {
+    channels.push({
+      dist: exclude.minX - bbox.minX,
+      rect: { minX: bbox.minX, maxX: exclude.minX, minY: exclude.minY, maxY: exclude.maxY },
+    })
+  }
+  if (exclude.maxX < bbox.maxX) {
+    channels.push({
+      dist: bbox.maxX - exclude.maxX,
+      rect: { minX: exclude.maxX, maxX: bbox.maxX, minY: exclude.minY, maxY: exclude.maxY },
+    })
+  }
+  if (exclude.minY > bbox.minY) {
+    channels.push({
+      dist: exclude.minY - bbox.minY,
+      rect: { minX: exclude.minX, maxX: exclude.maxX, minY: bbox.minY, maxY: exclude.minY },
+    })
+  }
+  if (exclude.maxY < bbox.maxY) {
+    channels.push({
+      dist: bbox.maxY - exclude.maxY,
+      rect: { minX: exclude.minX, maxX: exclude.maxX, minY: exclude.maxY, maxY: bbox.maxY },
+    })
+  }
+  if (channels.length === 0) return [exclude]
+  channels.sort((a, b) => a.dist - b.dist)
+  return [exclude, channels[0].rect]
+}
+
+function segmentThickenedBBox(seg: GroupExcludeSegment, pad: number): BBox {
+  return {
+    minX: Math.min(seg.x1, seg.x2) - pad,
+    maxX: Math.max(seg.x1, seg.x2) + pad,
+    minY: Math.min(seg.y1, seg.y2) - pad,
+    maxY: Math.max(seg.y1, seg.y2) + pad,
+  }
+}
+
+function pointSegDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1, dy = y2 - y1
+  const l2 = dx * dx + dy * dy
+  if (l2 === 0) return Math.hypot(px - x1, py - y1)
+  let t = ((px - x1) * dx + (py - y1) * dy) / l2
+  t = Math.max(0, Math.min(1, t))
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+}
+
+// Internal holes are banned — keep only the outer boundary loop(s).
+function keepOuterLoops(loops: Pt[][]): Pt[][] {
+  if (loops.length <= 1) return loops
+  const outer = loops.filter(loop => loopSignedArea(loop) > 0)
+  return outer.length > 0 ? outer : [loops.reduce((best, loop) =>
+    Math.abs(loopSignedArea(loop)) > Math.abs(loopSignedArea(best)) ? loop : best, loops[0])]
+}
+
+function loopSignedArea(loop: Pt[]): number {
+  let a = 0
+  for (let i = 0; i < loop.length; i++) {
+    const p = loop[i], q = loop[(i + 1) % loop.length]
+    a += p.x * q.y - q.x * p.y
+  }
+  return a / 2
 }
 
 function uniqueSorted(values: number[]): number[] {

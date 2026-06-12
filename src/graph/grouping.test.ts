@@ -45,10 +45,8 @@ describe('computeGroupLoops', () => {
     const shape = computeGroupShape(members, [])
     expect(shape.excluded).toEqual([])
     for (const m of members) expect(pointInLoops(shape.loops, m.x, m.y)).toBe(true)
-    // One outer loop with at most eight corners (bbox with optional stair removal).
     expect(shape.loops.length).toBe(1)
     expect(shape.loops[0].length).toBeLessThanOrEqual(8)
-    // The midpoint of the bbox is inside — no thin bridge required.
     expect(pointInLoops(shape.loops, 150, 100)).toBe(true)
   })
 
@@ -60,12 +58,22 @@ describe('computeGroupLoops', () => {
     expect(loops[0].length).toBe(4)
   })
 
-  it('excludes a non-member node sitting between members', () => {
+  it('excludes a non-member with a boundary-reaching cutout (no internal hole)', () => {
     const members = [node(0, 0), node(400, 0)]
     const intruder = node(200, 0)
     const loops = computeGroupLoops(members, [intruder])
+    expect(loops.length).toBe(1)
     expect(pointInLoops(loops, 0, 0)).toBe(true)
     expect(pointInLoops(loops, 400, 0)).toBe(true)
+    expect(pointInLoops(loops, 200, 0)).toBe(false)
+  })
+
+  it('carves around edges whose endpoints are both non-members', () => {
+    const members = [node(0, 0), node(400, 0)]
+    const loops = computeGroupLoops(members, [], {
+      excludeSegments: [{ x1: 200, y1: -30, x2: 200, y2: 30 }],
+    })
+    expect(loops.length).toBe(1)
     expect(pointInLoops(loops, 200, 0)).toBe(false)
   })
 

@@ -22,7 +22,7 @@ import {
   type Seg,
 } from './utils'
 import { computeEdgeGeometry, edgeMidOverride } from './layout/route'
-import { computeGroupLoops, computeGroupShape, loopsToPath, pointInLoops, type GroupRect, type Pt } from './grouping'
+import { computeGroupLoops, computeGroupShape, loopsToPath, pointInLoops, type GroupExcludeSegment, type GroupRect, type Pt } from './grouping'
 import { SpatialGrid } from './layout/grid'
 import { LayoutScheduler } from './layout/scheduler'
 import type { LayoutInput, LayoutResult, NodeSnap } from './layout/types'
@@ -825,7 +825,11 @@ export function addInteraction(
 
   // ── Groupings ───────────────────────────────────────────────────────────────
 
-  function groupRects(grouping: Grouping): { members: GroupRect[]; nonMembers: GroupRect[] } {
+  function groupShapeInput(grouping: Grouping): {
+    members: GroupRect[]
+    nonMembers: GroupRect[]
+    excludeSegments: GroupExcludeSegment[]
+  } {
     const memberSet = new Set(grouping.members)
     const members: GroupRect[] = []
     const nonMembers: GroupRect[] = []
@@ -834,7 +838,14 @@ export function addInteraction(
       if (memberSet.has(id)) members.push(rect)
       else nonMembers.push(rect)
     }
-    return { members, nonMembers }
+    const excludeSegments: GroupExcludeSegment[] = []
+    for (const edge of graph.edges) {
+      if (memberSet.has(edge.from) || memberSet.has(edge.to)) continue
+      const from = livePos.get(edge.from)
+      const to = livePos.get(edge.to)
+      if (from && to) excludeSegments.push({ x1: from.x, y1: from.y, x2: to.x, y2: to.y })
+    }
+    return { members, nonMembers, excludeSegments }
   }
 
   function styleGroupPath(path: SVGPathElement, color: string): void {
@@ -915,8 +926,8 @@ export function addInteraction(
       groupLayer.appendChild(path)
       groupPathById.set(grouping.id, path)
     }
-    const { members, nonMembers } = groupRects(grouping)
-    const loops = computeGroupLoops(members, nonMembers)
+    const { members, nonMembers, excludeSegments } = groupShapeInput(grouping)
+    const loops = computeGroupLoops(members, nonMembers, { excludeSegments })
     groupLoopsById.set(grouping.id, loops)
     path.setAttribute('d', loopsToPath(loops))
     renderGroupName(grouping, loops)
@@ -958,7 +969,7 @@ export function addInteraction(
     return hit
   }
 
-  function updateGroupsForNodes(ids: Iterable<string>): void {
+  function updateGroupsForNodes(ids: Iterable<string>, opts?: { deferUnlocked?: boolean }): void {
     const idList = [...ids]
     const affected = new Set<string>()
     for (const id of idList) {
@@ -966,8 +977,8 @@ export function addInteraction(
       if (set) for (const gid of set) affected.add(gid)
     }
     // Non-member groups whose region a moving node has entered must also
-    // recompute, so a locked group visibly adjusts to keep the node out (and an
-    // unlocked one carves around it until the node is dropped and absorbed).
+    // recompute, so a locked group visibly adjusts to keep the node out. Unlocked
+    // groups defer outline updates until drop unless deferUnlocked is false.
     for (const g of groupingById.values()) {
       if (affected.has(g.id)) continue
       for (const id of idList) {
@@ -976,7 +987,9 @@ export function addInteraction(
     }
     for (const gid of affected) {
       const g = groupingById.get(gid)
-      if (g) renderGrouping(g)
+      if (!g) continue
+      if (opts?.deferUnlocked && !g.locked) continue
+      renderGrouping(g)
     }
   }
 
@@ -1015,7 +1028,14 @@ export function addInteraction(
     for (const [id, p] of livePos) {
       if (!memberSet.has(id)) nonMembers.push({ x: p.x, y: p.y, hw: NODE_HW, hh: p.hh })
     }
-    const { excluded } = computeGroupShape(rects, nonMembers)
+    const excludeSegments: GroupExcludeSegment[] = []
+    for (const edge of graph.edges) {
+      if (memberSet.has(edge.from) || memberSet.has(edge.to)) continue
+      const from = livePos.get(edge.from)
+      const to = livePos.get(edge.to)
+      if (from && to) excludeSegments.push({ x1: from.x, y1: from.y, x2: to.x, y2: to.y })
+    }
+    const { excluded } = computeGroupShape(rects, nonMembers, { excludeSegments })
     if (excluded.length === 0) return memberIds
     const drop = new Set(excluded.map(i => present[i]))
     return memberIds.filter(id => !drop.has(id))
@@ -1757,13 +1777,13 @@ export function addInteraction(
           }
           invalidateGrid()
           for (const id of multiDragOrigins.keys()) updateEdgesForNode(id)
-          updateGroupsForNodes(multiDragOrigins.keys())
+          updateGroupsForNodes(multiDragOrigins.keys(), { deferUnlocked: true })
         } else {
           const id = activeNode.dataset.nodeId!
           moveDraggedNode(id, singleDragOrigin.cx, singleDragOrigin.cy, dx, dy)
           invalidateGrid()
           updateEdgesForNode(id)
-          updateGroupsForNodes([id])
+          updateGroupsForNodes([id], { deferUnlocked: true })
         }
         maybeRequestDragLayout()
       }
@@ -1904,6 +1924,7 @@ export function addInteraction(
         // dropped inside them and reconcile to a single region (each its own
         // undoable step, applied after the move).
         settleGroupsAfterDrag(moved)
+        updateGroupsForNodes(moved)
       }
       const wasDrag = hasDragged
       activeNode.style.cursor = 'grab'
