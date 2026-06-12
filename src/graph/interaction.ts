@@ -977,8 +977,7 @@ export function addInteraction(
       if (set) for (const gid of set) affected.add(gid)
     }
     // Non-member groups whose region a moving node has entered must also
-    // recompute, so a locked group visibly adjusts to keep the node out. Unlocked
-    // groups defer outline updates until drop unless deferUnlocked is false.
+    // recompute, so a locked group visibly adjusts to keep the node out.
     for (const g of groupingById.values()) {
       if (affected.has(g.id)) continue
       for (const id of idList) {
@@ -988,7 +987,9 @@ export function addInteraction(
     for (const gid of affected) {
       const g = groupingById.get(gid)
       if (!g) continue
-      if (opts?.deferUnlocked && !g.locked) continue
+      // During a drag, an unlocked group freezes only while a non-member is
+      // being dragged through it; dragging its own members keeps it live.
+      if (opts?.deferUnlocked && !g.locked && !idList.some(id => g.members.includes(id))) continue
       renderGrouping(g)
     }
   }
