@@ -46,7 +46,8 @@ describe('computeGroupLoops', () => {
     expect(shape.excluded).toEqual([])
     for (const m of members) expect(pointInLoops(shape.loops, m.x, m.y)).toBe(true)
     expect(shape.loops.length).toBe(1)
-    expect(shape.loops[0].length).toBeLessThanOrEqual(8)
+    expect(shape.loops[0].length).toBe(4)
+    // The middle of the bbox is inside — no thin bridge required.
     expect(pointInLoops(shape.loops, 150, 100)).toBe(true)
   })
 
@@ -58,23 +59,61 @@ describe('computeGroupLoops', () => {
     expect(loops[0].length).toBe(4)
   })
 
-  it('excludes a non-member with a boundary-reaching cutout (no internal hole)', () => {
-    const members = [node(0, 0), node(400, 0)]
-    const intruder = node(200, 0)
-    const loops = computeGroupLoops(members, [intruder])
-    expect(loops.length).toBe(1)
-    expect(pointInLoops(loops, 0, 0)).toBe(true)
-    expect(pointInLoops(loops, 400, 0)).toBe(true)
-    expect(pointInLoops(loops, 200, 0)).toBe(false)
+  it('keeps the full region when non-members sit outside it', () => {
+    // Regression: surrounding non-members must not shred the region into
+    // pieces that drop members.
+    const members = [node(0, 0), node(300, 0)]
+    const bystanders = [node(150, 200), node(150, -200), node(-250, 0), node(550, 0)]
+    const shape = computeGroupShape(members, bystanders)
+    expect(shape.excluded).toEqual([])
+    expect(shape.loops.length).toBe(1)
+    for (const m of members) expect(pointInLoops(shape.loops, m.x, m.y)).toBe(true)
   })
 
-  it('carves around edges whose endpoints are both non-members', () => {
+  it('excludes a non-member between members without creating an enclave', () => {
+    const members = [node(0, 0), node(400, 0)]
+    const intruder = node(200, 0)
+    const shape = computeGroupShape(members, [intruder])
+    expect(shape.excluded).toEqual([])
+    // Single loop: the cutout is a notch reaching the boundary, not a hole.
+    expect(shape.loops.length).toBe(1)
+    expect(pointInLoops(shape.loops, 0, 0)).toBe(true)
+    expect(pointInLoops(shape.loops, 400, 0)).toBe(true)
+    expect(pointInLoops(shape.loops, 200, 0)).toBe(false)
+  })
+
+  it('opens a channel for a non-member fully surrounded by members', () => {
+    const members = [node(0, 0), node(400, 0), node(0, 300), node(400, 300)]
+    const enclosed = node(200, 150)
+    const shape = computeGroupShape(members, [enclosed])
+    expect(shape.excluded).toEqual([])
+    expect(shape.loops.length).toBe(1) // no interior hole
+    expect(pointInLoops(shape.loops, 200, 150)).toBe(false)
+    for (const m of members) expect(pointInLoops(shape.loops, m.x, m.y)).toBe(true)
+  })
+
+  it('carves around a short non-member edge crossing the region', () => {
     const members = [node(0, 0), node(400, 0)]
     const loops = computeGroupLoops(members, [], {
-      excludeSegments: [{ x1: 200, y1: -30, x2: 200, y2: 30 }],
+      excludeSegments: [{ x1: 200, y1: -10, x2: 200, y2: 10 }],
     })
     expect(loops.length).toBe(1)
     expect(pointInLoops(loops, 200, 0)).toBe(false)
+    expect(pointInLoops(loops, 0, 0)).toBe(true)
+    expect(pointInLoops(loops, 400, 0)).toBe(true)
+  })
+
+  it('ignores a non-member edge whose carve would disconnect the members', () => {
+    // A tall vertical edge slicing the whole region: avoiding it is impossible
+    // without splitting the group, so it is left alone.
+    const members = [node(0, 0), node(400, 0)]
+    const shape = computeGroupShape(members, [], {
+      excludeSegments: [{ x1: 200, y1: -300, x2: 200, y2: 300 }],
+    })
+    expect(shape.excluded).toEqual([])
+    expect(shape.loops.length).toBe(1)
+    expect(shape.loops[0].length).toBe(4)
+    expect(pointInLoops(shape.loops, 200, 0)).toBe(true)
   })
 
   it('drops a member as an exclave when a non-member severs the region', () => {

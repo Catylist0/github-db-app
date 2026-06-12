@@ -2,13 +2,22 @@
 // nodes (and the rectangles of every other, non-member node), this computes an
 // Euler-diagram-style rectilinear outline.
 //
-// The region is the simplest reasonable axis-aligned shape: a padded bounding
-// box around all members, with cut-outs around non-members and non-member-only
-// edges. Each cut-out reaches the outer boundary — internal enclaves (holes) are
-// never emitted. Extra interior space is acceptable; jagged or spindly boundaries
-// are not. Carving can split the region — when that disconnects a member from the
-// main body, the member is reported as an exclave so the caller can drop it from
-// the group entirely (a group can never have an exclave).
+// The region is the simplest reasonable axis-aligned shape: the padded bounding
+// box of all members, minus keep-out boxes around non-members — conceptually the
+// cheap version of unioning the members' rectangular voronoi cells. Two hard
+// rules shape the result:
+//
+//   • No enclaves: the region never contains an interior hole. When a carved
+//     keep-out would be fully surrounded, a channel is opened from it to the
+//     nearest boundary — but only for genuinely enclosed cutouts, and along the
+//     cheapest direction that keeps the members connected.
+//   • No exclaves: the region is a single connected shape. If carving splits it,
+//     the component holding the most members wins and the rest are reported as
+//     `excluded` so the caller can drop them from the group.
+//
+// Edges whose two endpoints are both non-members are avoided softly: their
+// capsule is carved out unless doing so would disconnect the members, in which
+// case the edge is ignored ("unless it's not possible").
 //
 // Nothing here touches the DOM, so it can be unit-tested in node. The result is
 // an SVG path `d` string with only horizontal/vertical edges and rounded corners.
@@ -38,8 +47,6 @@ const DEFAULTS = { memberPad: 26, excludePad: 16, corner: 14 }
 
 export type Pt = { x: number; y: number }
 
-type BBox = { minX: number; minY: number; maxX: number; maxY: number }
-
 // The computed shape of a group: its rectilinear outline loops plus the indices
 // (into the `members` array passed in) of members that could not be reached
 // without forming an exclave and so were excluded from the rendered region.
@@ -59,12 +66,12 @@ export function computeGroupOutline(
 }
 
 // Render simplified rectilinear loops to a single SVG path `d` string with
-// rounded corners (sub-paths joined; holes rely on fill-rule: evenodd).
+// rounded corners (sub-paths joined).
 export function loopsToPath(loops: Pt[][], corner: number = DEFAULTS.corner): string {
   return loops.map(loop => roundedRectilinearPath(loop, corner)).filter(Boolean).join(' ')
 }
 
-// Even-odd point-in-polygon over a set of loops (so holes read as outside).
+// Even-odd point-in-polygon over a set of loops.
 export function pointInLoops(loops: Pt[][], px: number, py: number): boolean {
   let inside = false
   for (const loop of loops) {
@@ -79,7 +86,7 @@ export function pointInLoops(loops: Pt[][], px: number, py: number): boolean {
   return inside
 }
 
-// Backward-compatible helper: just the outline loops of the main region.
+// Backward-compatible helper: just the outline loops of the region.
 export function computeGroupLoops(
   members: GroupRect[],
   nonMembers: GroupRect[],
@@ -99,49 +106,36 @@ export function computeGroupShape(
   if (members.length === 0) return { loops: [], excluded: [] }
   const memberPad = options.memberPad ?? DEFAULTS.memberPad
   const excludePad = options.excludePad ?? DEFAULTS.excludePad
-  const excludeSegments = options.excludeSegments ?? []
+  const segments = options.excludeSegments ?? []
 
-  // Outer envelope: one padded axis-aligned box around every member.
-  const bbox: BBox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+  // Outer envelope: one padded axis-aligned box around every member. The grid
+  // spans exactly this box, so every cell is implicitly "in the bbox".
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   for (const m of members) {
-    bbox.minX = Math.min(bbox.minX, m.x - m.hw - memberPad)
-    bbox.minY = Math.min(bbox.minY, m.y - m.hh - memberPad)
-    bbox.maxX = Math.max(bbox.maxX, m.x + m.hw + memberPad)
-    bbox.maxY = Math.max(bbox.maxY, m.y + m.hh + memberPad)
+    minX = Math.min(minX, m.x - m.hw - memberPad)
+    minY = Math.min(minY, m.y - m.hh - memberPad)
+    maxX = Math.max(maxX, m.x + m.hw + memberPad)
+    maxY = Math.max(maxY, m.y + m.hh + memberPad)
   }
 
-  // Cut-outs around obstacles reach the bbox edge so the region never contains
-  // an internal hole — only notches/channels open to the outside.
-  const cutouts: BBox[] = []
+  // Coordinate-compressed grid: cell boundaries only at meaningful x/y values,
+  // so the traced outline has as few vertices as the geometry allows.
+  const xCuts: number[] = []
+  const yCuts: number[] = []
+  for (const m of members) {
+    xCuts.push(m.x - m.hw, m.x + m.hw)
+    yCuts.push(m.y - m.hh, m.y + m.hh)
+  }
   for (const n of nonMembers) {
-    cutouts.push(...cutoutToEdge({
-      minX: n.x - n.hw - excludePad,
-      maxX: n.x + n.hw + excludePad,
-      minY: n.y - n.hh - excludePad,
-      maxY: n.y + n.hh + excludePad,
-    }, bbox))
+    xCuts.push(n.x - n.hw - excludePad, n.x + n.hw + excludePad)
+    yCuts.push(n.y - n.hh - excludePad, n.y + n.hh + excludePad)
   }
-  for (const seg of excludeSegments) {
-    cutouts.push(...cutoutToEdge(segmentThickenedBBox(seg, excludePad), bbox))
+  for (const s of segments) {
+    xCuts.push(Math.min(s.x1, s.x2) - excludePad, Math.max(s.x1, s.x2) + excludePad)
+    yCuts.push(Math.min(s.y1, s.y2) - excludePad, Math.max(s.y1, s.y2) + excludePad)
   }
-
-  // Build a coordinate-compressed grid: cell boundaries only at meaningful
-  // x/y values so the traced outline has as few vertices as possible.
-  const xs = uniqueSorted([
-    bbox.minX, bbox.maxX,
-    ...members.flatMap(m => [m.x - m.hw, m.x + m.hw, m.x - m.hw - memberPad, m.x + m.hw + memberPad]),
-    ...nonMembers.flatMap(n => [n.x - n.hw - excludePad, n.x + n.hw + excludePad]),
-    ...cutouts.flatMap(r => [r.minX, r.maxX]),
-    ...excludeSegments.flatMap(s => [s.x1, s.x2]),
-  ])
-  const ys = uniqueSorted([
-    bbox.minY, bbox.maxY,
-    ...members.flatMap(m => [m.y - m.hh, m.y + m.hh, m.y - m.hh - memberPad, m.y + m.hh + memberPad]),
-    ...nonMembers.flatMap(n => [n.y - n.hh - excludePad, n.y + n.hh + excludePad]),
-    ...cutouts.flatMap(r => [r.minY, r.maxY]),
-    ...excludeSegments.flatMap(s => [s.y1, s.y2]),
-  ])
-
+  const xs = compressCuts(xCuts, minX, maxX)
+  const ys = compressCuts(yCuts, minY, maxY)
   const cols = xs.length - 1
   const rows = ys.length - 1
   if (cols <= 0 || rows <= 0) return { loops: [], excluded: [] }
@@ -149,160 +143,233 @@ export function computeGroupShape(
   const inRect = (px: number, py: number, r: GroupRect, pad: number): boolean =>
     Math.abs(px - r.x) <= r.hw + pad && Math.abs(py - r.y) <= r.hh + pad
 
-  const inBbox = (px: number, py: number): boolean =>
-    px >= bbox.minX && px <= bbox.maxX && py >= bbox.minY && py <= bbox.maxY
-
-  const inCutout = (px: number, py: number): boolean => {
-    for (const r of cutouts) {
-      if (px >= r.minX && px <= r.maxX && py >= r.minY && py <= r.maxY) return true
-    }
-    for (const seg of excludeSegments) {
-      if (pointSegDist(px, py, seg.x1, seg.y1, seg.x2, seg.y2) <= excludePad) return true
-    }
-    return false
-  }
-
-  // A cell (sampled at its centre) is inside when it lies in the padded bbox
-  // and is not in any cut-out — except that a member's own core rectangle is
-  // always kept, so members are never carved out by a non-member on top of them.
-  const inside = (i: number, j: number): boolean => {
-    const px = (xs[i] + xs[i + 1]) / 2
-    const py = (ys[j] + ys[j + 1]) / 2
-    for (const m of members) {
-      if (inRect(px, py, m, 0)) return true // member core — always in
-    }
-    if (!inBbox(px, py)) return false
-    if (inCutout(px, py)) return false
-    return true
-  }
-
+  // Fill: a cell is inside unless a non-member keep-out covers it. A member's
+  // own core rectangle is always kept (and can never be carved later), so
+  // members are never cut out by anything sitting on top of them.
   const grid: boolean[] = new Array(cols * rows)
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) grid[j * cols + i] = inside(i, j)
-  }
-
-  // Split the inside cells into connected components, keep the one holding the
-  // most members (the main region), and report every member outside it as an
-  // exclave. Non-main cells are cleared so only the single region is traced.
-  const { excluded } = keepMainComponent(grid, members, cols, rows, xs, ys)
-
-  const at = (i: number, j: number): boolean =>
-    i >= 0 && j >= 0 && i < cols && j < rows && grid[j * cols + i]
-
-  // Collect directed boundary edges using each inside cell's own clockwise
-  // winding (screen coords: x→right, y→down). A unit cell border is a boundary
-  // exactly when its outward neighbour is outside; only the inside cell emits
-  // it, so the whole boundary is consistently wound (outer loops clockwise,
-  // holes counter-clockwise). Corners sit on the compressed grid (xs, ys).
-  const key = (i: number, j: number): number => j * (cols + 1) + i
-  const out = new Map<number, Array<{ i: number; j: number }>>()
-  const addEdge = (ai: number, aj: number, bi: number, bj: number): void => {
-    const k = key(ai, aj)
-    const list = out.get(k)
-    if (list) list.push({ i: bi, j: bj })
-    else out.set(k, [{ i: bi, j: bj }])
-  }
+  const core = new Uint8Array(cols * rows)
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
-      if (!grid[j * cols + i]) continue
-      if (!at(i, j - 1)) addEdge(i, j, i + 1, j)         // top edge, →
-      if (!at(i + 1, j)) addEdge(i + 1, j, i + 1, j + 1) // right edge, ↓
-      if (!at(i, j + 1)) addEdge(i + 1, j + 1, i, j + 1) // bottom edge, ←
-      if (!at(i - 1, j)) addEdge(i, j + 1, i, j)         // left edge, ↑
-    }
-  }
-
-  // Walk the directed edges into closed loops. At a degree-4 corner (two
-  // regions kissing diagonally) prefer the sharpest clockwise turn so loops
-  // stay simple and non-crossing.
-  const loops: Pt[][] = []
-  for (const [startKey, startList] of out) {
-    while (startList.length > 0) {
-      const start = { i: startKey % (cols + 1), j: Math.floor(startKey / (cols + 1)) }
-      const first = startList.shift()!
-      const loop: Array<{ i: number; j: number }> = [start]
-      let prev = start
-      let cur = first
-      while (cur.i !== start.i || cur.j !== start.j) {
-        loop.push(cur)
-        const list = out.get(key(cur.i, cur.j))
-        if (!list || list.length === 0) break
-        const inDir = { x: cur.i - prev.i, y: cur.j - prev.j }
-        let bestIdx = 0
-        if (list.length > 1) bestIdx = pickClockwise(inDir, cur, list)
-        const next = list.splice(bestIdx, 1)[0]
-        prev = cur
-        cur = next
+      const idx = j * cols + i
+      const px = (xs[i] + xs[i + 1]) / 2
+      const py = (ys[j] + ys[j + 1]) / 2
+      let isCore = false
+      for (const m of members) {
+        if (inRect(px, py, m, 0)) { isCore = true; break }
       }
-      loops.push(loop.map(p => ({ x: xs[p.i], y: ys[p.j] })))
+      core[idx] = isCore ? 1 : 0
+      if (isCore) { grid[idx] = true; continue }
+      let blocked = false
+      for (const n of nonMembers) {
+        if (inRect(px, py, n, excludePad)) { blocked = true; break }
+      }
+      grid[idx] = !blocked
     }
   }
 
+  // The cell each member's centre lives in — used for connectivity checks.
+  const memberCells = members.map(m =>
+    cellIndex(ys, m.y, rows) * cols + cellIndex(xs, m.x, cols))
+
+  // Soft carve: non-member-only edges are avoided unless removing their capsule
+  // would disconnect the members, in which case that edge is skipped.
+  for (const s of segments) {
+    const sMinX = Math.min(s.x1, s.x2) - excludePad
+    const sMaxX = Math.max(s.x1, s.x2) + excludePad
+    const sMinY = Math.min(s.y1, s.y2) - excludePad
+    const sMaxY = Math.max(s.y1, s.y2) + excludePad
+    const removed: number[] = []
+    for (let j = 0; j < rows; j++) {
+      if (ys[j + 1] < sMinY || ys[j] > sMaxY) continue
+      for (let i = 0; i < cols; i++) {
+        if (xs[i + 1] < sMinX || xs[i] > sMaxX) continue
+        const idx = j * cols + i
+        if (!grid[idx] || core[idx]) continue
+        // Strictly inside the capsule: a cell the capsule only touches at its
+        // edge has zero overlap and must not be carved.
+        if (segRectDist(s, xs[i], ys[j], xs[i + 1], ys[j + 1]) < excludePad - 1e-7) removed.push(idx)
+      }
+    }
+    if (removed.length === 0) continue
+    for (const idx of removed) grid[idx] = false
+    if (!membersConnected(grid, cols, rows, memberCells)) {
+      for (const idx of removed) grid[idx] = true
+    }
+  }
+
+  // No enclaves: any carved-out pocket not connected to the boundary gets a
+  // channel to the nearest edge — choosing, among the four directions, the one
+  // that keeps members connected and removes the least area. Channels never cut
+  // through member cores; if every direction is blocked by a core the hole is
+  // left and its loop is dropped at the end (the non-member reads as inside,
+  // the lesser evil to an enclave ring).
+  openEnclosedHoles(grid, core, cols, rows, xs, ys, memberCells)
+
+  // No exclaves: keep the component holding the most members; report the rest.
+  const { excluded } = keepMainComponent(grid, members, cols, rows, xs, ys)
+
+  const loops = traceBoundaryLoops(grid, cols, rows, xs, ys)
   return {
-    loops: keepOuterLoops(loops.map(simplifyRectilinear).filter(loop => loop.length >= 3)),
+    loops: keepOuterLoops(loops.map(simplifyCollinear).filter(loop => loop.length >= 3)),
     excluded,
   }
 }
 
-// Extend an obstacle's padded exclude box to the nearest bbox edge with a
-// channel of the same width/height, so the cut-out opens to the boundary.
-function cutoutToEdge(exclude: BBox, bbox: BBox): BBox[] {
-  const channels: Array<{ dist: number; rect: BBox }> = []
-  if (exclude.minX > bbox.minX) {
-    channels.push({
-      dist: exclude.minX - bbox.minX,
-      rect: { minX: bbox.minX, maxX: exclude.minX, minY: exclude.minY, maxY: exclude.maxY },
-    })
+// Sorted unique cell boundaries clamped to [lo, hi], endpoints always included.
+function compressCuts(values: number[], lo: number, hi: number): number[] {
+  const rLo = round(lo), rHi = round(hi)
+  const set = new Set<number>([rLo, rHi])
+  for (const v of values) {
+    const r = round(v)
+    if (r > rLo && r < rHi) set.add(r)
   }
-  if (exclude.maxX < bbox.maxX) {
-    channels.push({
-      dist: bbox.maxX - exclude.maxX,
-      rect: { minX: exclude.maxX, maxX: bbox.maxX, minY: exclude.minY, maxY: exclude.maxY },
-    })
-  }
-  if (exclude.minY > bbox.minY) {
-    channels.push({
-      dist: exclude.minY - bbox.minY,
-      rect: { minX: exclude.minX, maxX: exclude.maxX, minY: bbox.minY, maxY: exclude.minY },
-    })
-  }
-  if (exclude.maxY < bbox.maxY) {
-    channels.push({
-      dist: bbox.maxY - exclude.maxY,
-      rect: { minX: exclude.minX, maxX: exclude.maxX, minY: exclude.maxY, maxY: bbox.maxY },
-    })
-  }
-  if (channels.length === 0) return [exclude]
-  channels.sort((a, b) => a.dist - b.dist)
-  return [exclude, channels[0].rect]
+  return [...set].sort((a, b) => a - b)
 }
 
-function segmentThickenedBBox(seg: GroupExcludeSegment, pad: number): BBox {
-  return {
-    minX: Math.min(seg.x1, seg.x2) - pad,
-    maxX: Math.max(seg.x1, seg.x2) + pad,
-    minY: Math.min(seg.y1, seg.y2) - pad,
-    maxY: Math.max(seg.y1, seg.y2) + pad,
+// BFS over inside cells: do all member cells share one connected component?
+function membersConnected(grid: boolean[], cols: number, rows: number, memberCells: number[]): boolean {
+  if (memberCells.length <= 1) return true
+  const targets = new Set(memberCells)
+  const seen = new Uint8Array(cols * rows)
+  const stack = [memberCells[0]]
+  seen[memberCells[0]] = 1
+  let found = 0
+  while (stack.length) {
+    const idx = stack.pop()!
+    if (targets.has(idx)) {
+      targets.delete(idx)
+      found++
+      if (targets.size === 0) return true
+    }
+    const i = idx % cols, j = (idx - i) / cols
+    const nbrs = [
+      i > 0 ? idx - 1 : -1,
+      i < cols - 1 ? idx + 1 : -1,
+      j > 0 ? idx - cols : -1,
+      j < rows - 1 ? idx + cols : -1,
+    ]
+    for (const nb of nbrs) {
+      if (nb >= 0 && grid[nb] && !seen[nb]) { seen[nb] = 1; stack.push(nb) }
+    }
+  }
+  return targets.size === 0
+}
+
+// Outside cells (grid=false) not reachable from the grid border are holes.
+function findHoles(grid: boolean[], cols: number, rows: number): number[][] {
+  const mark = new Int8Array(cols * rows) // 0 unvisited, 1 reaches border, 2 hole
+  const stack: number[] = []
+  const seed = (idx: number): void => {
+    if (!grid[idx] && mark[idx] === 0) { mark[idx] = 1; stack.push(idx) }
+  }
+  for (let i = 0; i < cols; i++) { seed(i); seed((rows - 1) * cols + i) }
+  for (let j = 0; j < rows; j++) { seed(j * cols); seed(j * cols + cols - 1) }
+  while (stack.length) {
+    const idx = stack.pop()!
+    const i = idx % cols, j = (idx - i) / cols
+    const nbrs = [
+      i > 0 ? idx - 1 : -1,
+      i < cols - 1 ? idx + 1 : -1,
+      j > 0 ? idx - cols : -1,
+      j < rows - 1 ? idx + cols : -1,
+    ]
+    for (const nb of nbrs) {
+      if (nb >= 0 && !grid[nb] && mark[nb] === 0) { mark[nb] = 1; stack.push(nb) }
+    }
+  }
+  const holes: number[][] = []
+  for (let s = 0; s < grid.length; s++) {
+    if (grid[s] || mark[s] !== 0) continue
+    const hole: number[] = []
+    mark[s] = 2
+    stack.push(s)
+    while (stack.length) {
+      const idx = stack.pop()!
+      hole.push(idx)
+      const i = idx % cols, j = (idx - i) / cols
+      const nbrs = [
+        i > 0 ? idx - 1 : -1,
+        i < cols - 1 ? idx + 1 : -1,
+        j > 0 ? idx - cols : -1,
+        j < rows - 1 ? idx + cols : -1,
+      ]
+      for (const nb of nbrs) {
+        if (nb >= 0 && !grid[nb] && mark[nb] === 0) { mark[nb] = 2; stack.push(nb) }
+      }
+    }
+    holes.push(hole)
+  }
+  return holes
+}
+
+// Open every enclosed hole with the cheapest viable straight channel to the
+// boundary. Re-scans after each carve since one channel can open several holes.
+function openEnclosedHoles(
+  grid: boolean[],
+  core: Uint8Array,
+  cols: number,
+  rows: number,
+  xs: number[],
+  ys: number[],
+  memberCells: number[],
+): void {
+  const failed = new Set<number>()
+  for (let guard = 0; guard < 64; guard++) {
+    const holes = findHoles(grid, cols, rows).filter(h => !failed.has(h[0]))
+    if (holes.length === 0) return
+    const hole = holes[0]
+    let i0 = cols, i1 = -1, j0 = rows, j1 = -1
+    for (const idx of hole) {
+      const i = idx % cols, j = (idx - i) / cols
+      if (i < i0) i0 = i
+      if (i > i1) i1 = i
+      if (j < j0) j0 = j
+      if (j > j1) j1 = j
+    }
+    // Channel rectangles from the hole's bounds to each grid edge.
+    const rects = [
+      { ia: 0, ib: i0 - 1, ja: j0, jb: j1 },      // left
+      { ia: i1 + 1, ib: cols - 1, ja: j0, jb: j1 }, // right
+      { ia: i0, ib: i1, ja: 0, jb: j0 - 1 },      // up
+      { ia: i0, ib: i1, ja: j1 + 1, jb: rows - 1 }, // down
+    ]
+    let best: { cells: number[]; area: number; connected: boolean } | null = null
+    for (const r of rects) {
+      const cells: number[] = []
+      let area = 0
+      let blocked = false
+      for (let j = r.ja; j <= r.jb && !blocked; j++) {
+        for (let i = r.ia; i <= r.ib; i++) {
+          const idx = j * cols + i
+          if (core[idx]) { blocked = true; break }
+          if (!grid[idx]) continue
+          cells.push(idx)
+          area += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j])
+        }
+      }
+      if (blocked) continue
+      for (const idx of cells) grid[idx] = false
+      const connected = membersConnected(grid, cols, rows, memberCells)
+      for (const idx of cells) grid[idx] = true
+      if (!best ||
+          (connected && !best.connected) ||
+          (connected === best.connected && area < best.area)) {
+        best = { cells, area, connected }
+      }
+    }
+    if (!best) { failed.add(hole[0]); continue }
+    for (const idx of best.cells) grid[idx] = false
   }
 }
 
-function pointSegDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
-  const dx = x2 - x1, dy = y2 - y1
-  const l2 = dx * dx + dy * dy
-  if (l2 === 0) return Math.hypot(px - x1, py - y1)
-  let t = ((px - x1) * dx + (py - y1) * dy) / l2
-  t = Math.max(0, Math.min(1, t))
-  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
-}
-
-// Internal holes are banned — keep only the outer boundary loop(s).
+// Drop any interior hole loop that could not be opened — enclaves are banned.
 function keepOuterLoops(loops: Pt[][]): Pt[][] {
   if (loops.length <= 1) return loops
   const outer = loops.filter(loop => loopSignedArea(loop) > 0)
-  return outer.length > 0 ? outer : [loops.reduce((best, loop) =>
-    Math.abs(loopSignedArea(loop)) > Math.abs(loopSignedArea(best)) ? loop : best, loops[0])]
+  return outer.length > 0 ? outer : loops
 }
 
+// Signed area in screen coords (y down): positive for clockwise outer loops.
 function loopSignedArea(loop: Pt[]): number {
   let a = 0
   for (let i = 0; i < loop.length; i++) {
@@ -310,10 +377,6 @@ function loopSignedArea(loop: Pt[]): number {
     a += p.x * q.y - q.x * p.y
   }
   return a / 2
-}
-
-function uniqueSorted(values: number[]): number[] {
-  return [...new Set(values.map(v => round(v)))].sort((a, b) => a - b)
 }
 
 // Flood-fill the inside grid into connected components (4-connectivity), keep
@@ -382,6 +445,66 @@ function cellIndex(breaks: number[], v: number, count: number): number {
   return count - 1
 }
 
+// Collect directed boundary edges using each inside cell's own clockwise
+// winding (screen coords: x→right, y→down) and walk them into closed loops.
+// A unit cell border is a boundary exactly when its outward neighbour is
+// outside; only the inside cell emits it, so the whole boundary is consistently
+// wound (outer loops clockwise, holes counter-clockwise).
+function traceBoundaryLoops(
+  grid: boolean[],
+  cols: number,
+  rows: number,
+  xs: number[],
+  ys: number[],
+): Pt[][] {
+  const at = (i: number, j: number): boolean =>
+    i >= 0 && j >= 0 && i < cols && j < rows && grid[j * cols + i]
+
+  const key = (i: number, j: number): number => j * (cols + 1) + i
+  const out = new Map<number, Array<{ i: number; j: number }>>()
+  const addEdge = (ai: number, aj: number, bi: number, bj: number): void => {
+    const k = key(ai, aj)
+    const list = out.get(k)
+    if (list) list.push({ i: bi, j: bj })
+    else out.set(k, [{ i: bi, j: bj }])
+  }
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      if (!grid[j * cols + i]) continue
+      if (!at(i, j - 1)) addEdge(i, j, i + 1, j)         // top edge, →
+      if (!at(i + 1, j)) addEdge(i + 1, j, i + 1, j + 1) // right edge, ↓
+      if (!at(i, j + 1)) addEdge(i + 1, j + 1, i, j + 1) // bottom edge, ←
+      if (!at(i - 1, j)) addEdge(i, j + 1, i, j)         // left edge, ↑
+    }
+  }
+
+  // At a degree-4 corner (two regions kissing diagonally) prefer the sharpest
+  // clockwise turn so loops stay simple and non-crossing.
+  const loops: Pt[][] = []
+  for (const [startKey, startList] of out) {
+    while (startList.length > 0) {
+      const start = { i: startKey % (cols + 1), j: Math.floor(startKey / (cols + 1)) }
+      const first = startList.shift()!
+      const loop: Array<{ i: number; j: number }> = [start]
+      let prev = start
+      let cur = first
+      while (cur.i !== start.i || cur.j !== start.j) {
+        loop.push(cur)
+        const list = out.get(key(cur.i, cur.j))
+        if (!list || list.length === 0) break
+        const inDir = { x: cur.i - prev.i, y: cur.j - prev.j }
+        let bestIdx = 0
+        if (list.length > 1) bestIdx = pickClockwise(inDir, cur, list)
+        const next = list.splice(bestIdx, 1)[0]
+        prev = cur
+        cur = next
+      }
+      loops.push(loop.map(p => ({ x: xs[p.i], y: ys[p.j] })))
+    }
+  }
+  return loops
+}
+
 // Choose the outgoing edge that turns most clockwise relative to the incoming
 // direction (keeps the traced region on a consistent side at junctions).
 function pickClockwise(
@@ -409,17 +532,6 @@ function pickClockwise(
   return bestIdx
 }
 
-// Drop collinear interior points and collapse one-cell stair-steps so each
-// retained vertex is a real corner.
-function simplifyRectilinear(loop: Pt[]): Pt[] {
-  let cur = simplifyCollinear(loop)
-  for (;;) {
-    const next = collapseStairs(cur)
-    if (next.length === cur.length) return next
-    cur = simplifyCollinear(next)
-  }
-}
-
 // Drop collinear interior points so each retained vertex is a real corner.
 function simplifyCollinear(loop: Pt[]): Pt[] {
   const n = loop.length
@@ -436,25 +548,50 @@ function simplifyCollinear(loop: Pt[]): Pt[] {
   return out.length >= 3 ? out : loop
 }
 
-// Remove a rectilinear stair-step: A→B→C→D where AB ∥ CD and BC is the short
-// perpendicular leg between two parallel runs on different lines.
-function collapseStairs(loop: Pt[]): Pt[] {
-  const n = loop.length
-  if (n < 4) return loop
-  const out: Pt[] = []
-  for (let i = 0; i < n; i++) {
-    const a = loop[(i - 1 + n) % n]
-    const b = loop[i]
-    const c = loop[(i + 1) % n]
-    const d = loop[(i + 2) % n]
-    const abH = a.y === b.y, abV = a.x === b.x
-    const bcH = b.y === c.y, bcV = b.x === c.x
-    const cdH = c.y === d.y, cdV = c.x === c.x
-    if (abH && bcV && cdH && abH === cdH && a.y !== c.y) continue // drop B
-    if (abV && bcH && cdV && abV === cdV && a.x !== c.x) continue // drop C
-    out.push(b)
+// Minimum distance from a segment to an axis-aligned rectangle (0 on overlap).
+function segRectDist(s: GroupExcludeSegment, rx0: number, ry0: number, rx1: number, ry1: number): number {
+  const inR = (x: number, y: number): boolean => x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1
+  if (inR(s.x1, s.y1) || inR(s.x2, s.y2)) return 0
+  const corners = [
+    { x: rx0, y: ry0 }, { x: rx1, y: ry0 },
+    { x: rx1, y: ry1 }, { x: rx0, y: ry1 },
+  ]
+  let best = Infinity
+  for (let k = 0; k < 4; k++) {
+    const a = corners[k], b = corners[(k + 1) % 4]
+    if (segmentsCross(s.x1, s.y1, s.x2, s.y2, a.x, a.y, b.x, b.y)) return 0
+    best = Math.min(
+      best,
+      pointSegDist(a.x, a.y, s.x1, s.y1, s.x2, s.y2),
+      pointSegDist(b.x, b.y, s.x1, s.y1, s.x2, s.y2),
+      pointSegDist(s.x1, s.y1, a.x, a.y, b.x, b.y),
+      pointSegDist(s.x2, s.y2, a.x, a.y, b.x, b.y),
+    )
   }
-  return out.length >= 3 ? out : loop
+  return best
+}
+
+function segmentsCross(
+  ax1: number, ay1: number, ax2: number, ay2: number,
+  bx1: number, by1: number, bx2: number, by2: number,
+): boolean {
+  const o = (px: number, py: number, qx: number, qy: number, rx: number, ry: number): number =>
+    (qx - px) * (ry - py) - (qy - py) * (rx - px)
+  const d1 = o(bx1, by1, bx2, by2, ax1, ay1)
+  const d2 = o(bx1, by1, bx2, by2, ax2, ay2)
+  const d3 = o(ax1, ay1, ax2, ay2, bx1, by1)
+  const d4 = o(ax1, ay1, ax2, ay2, bx2, by2)
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+         ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+}
+
+function pointSegDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1, dy = y2 - y1
+  const l2 = dx * dx + dy * dy
+  if (l2 === 0) return Math.hypot(px - x1, py - y1)
+  let t = ((px - x1) * dx + (py - y1) * dy) / l2
+  t = Math.max(0, Math.min(1, t))
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 }
 
 // Emit a closed sub-path with rounded corners. Each corner is replaced by a
