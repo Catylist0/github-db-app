@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeGroupLoops, computeGroupOutline, type GroupRect, type Pt } from './grouping'
+import { computeGroupLoops, computeGroupShape, computeGroupOutline, type GroupRect, type Pt } from './grouping'
 
 const node = (x: number, y: number): GroupRect => ({ x, y, hw: 60, hh: 20 })
 

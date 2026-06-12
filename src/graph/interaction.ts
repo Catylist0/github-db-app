@@ -22,7 +22,7 @@ import {
   type Seg,
 } from './utils'
 import { computeEdgeGeometry, edgeMidOverride } from './layout/route'
-import { computeGroupLoops, loopsToPath, pointInLoops, type GroupRect, type Pt } from './grouping'
+import { computeGroupLoops, computeGroupShape, loopsToPath, pointInLoops, type GroupRect, type Pt } from './grouping'
 import { SpatialGrid } from './layout/grid'
 import { LayoutScheduler } from './layout/scheduler'
 import type { LayoutInput, LayoutResult, NodeSnap } from './layout/types'
@@ -946,6 +946,18 @@ export function addInteraction(
     return p.x >= b.minX - M && p.x <= b.maxX + M && p.y >= b.minY - M && p.y <= b.maxY + M
   }
 
+  // Topmost group whose area contains a viewport-space point (later-rendered
+  // groups sit on top, so the last match wins). Used to select a group when its
+  // background — not just its dashed border — is clicked.
+  function groupAtPoint(vpX: number, vpY: number): string | null {
+    let hit: string | null = null
+    for (const id of groupingById.keys()) {
+      const loops = groupLoopsById.get(id)
+      if (loops && pointInLoops(loops, vpX, vpY)) hit = id
+    }
+    return hit
+  }
+
   function updateGroupsForNodes(ids: Iterable<string>): void {
     const idList = [...ids]
     const affected = new Set<string>()
@@ -968,33 +980,70 @@ export function addInteraction(
     }
   }
 
-  // On drop, an unlocked group absorbs any dragged node whose centre landed in
-  // its area. Containment is tested against the members-only region (no
-  // exclusions) so a node sitting in the boundary's avoidance notch still counts.
-  function absorbDraggedNodes(ids: string[]): void {
+  function sameMembers(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) return false
+    const sb = new Set(b)
+    return a.every(x => sb.has(x))
+  }
+
+  // The members-only region of a group (no non-member exclusions), used to test
+  // whether a dropped node lands "inside the group area" for absorption.
+  function membersFillLoops(g: Grouping): Pt[][] {
+    const rects: GroupRect[] = []
+    for (const id of g.members) {
+      const p = livePos.get(id)
+      if (p) rects.push({ x: p.x, y: p.y, hw: NODE_HW, hh: p.hh })
+    }
+    return rects.length ? computeGroupLoops(rects, []) : []
+  }
+
+  // Drop any member that can only be reached as an exclave (a non-member severs
+  // its corridor to the main body), so the group stays a single region. Members
+  // with no live position (e.g. a deleted node pending undo) are left untouched.
+  function reconcileMembers(memberIds: string[]): string[] {
+    const present: string[] = []
+    const rects: GroupRect[] = []
+    for (const id of memberIds) {
+      const p = livePos.get(id)
+      if (!p) continue
+      present.push(id)
+      rects.push({ x: p.x, y: p.y, hw: NODE_HW, hh: p.hh })
+    }
+    if (rects.length <= 1) return memberIds
+    const memberSet = new Set(memberIds)
+    const nonMembers: GroupRect[] = []
+    for (const [id, p] of livePos) {
+      if (!memberSet.has(id)) nonMembers.push({ x: p.x, y: p.y, hw: NODE_HW, hh: p.hh })
+    }
+    const { excluded } = computeGroupShape(rects, nonMembers)
+    if (excluded.length === 0) return memberIds
+    const drop = new Set(excluded.map(i => present[i]))
+    return memberIds.filter(id => !drop.has(id))
+  }
+
+  function commitMembers(g: Grouping, next: string[]): void {
+    if (sameMembers(g.members, next)) return
+    record({ type: 'members-grouping', id: g.id, from: [...g.members], to: next })
+    internalSetGroupingMembers(g.id, next)
+  }
+
+  // On drop: an unlocked group absorbs nodes dropped inside its area, then every
+  // affected group reconciles to a single region (exclaves removed).
+  function settleGroupsAfterDrag(movedIds: string[]): void {
     for (const g of groupingById.values()) {
-      if (g.locked) continue
-      const memberSet = new Set(g.members)
-      const candidates = ids.filter(id => !memberSet.has(id) && livePos.has(id))
-      if (candidates.length === 0) continue
-      // Cheap reject: skip the outline pass unless a candidate is near the group.
-      if (!candidates.some(id => nodeNearGroup(id, g))) continue
-      const members: GroupRect[] = []
-      for (const mid of g.members) {
-        const mp = livePos.get(mid)
-        if (mp) members.push({ x: mp.x, y: mp.y, hw: NODE_HW, hh: mp.hh })
+      const touches = movedIds.some(id => g.members.includes(id) || nodeNearGroup(id, g))
+      if (!touches) continue
+      const members = [...g.members]
+      const memberSet = new Set(members)
+      if (!g.locked) {
+        const fill = membersFillLoops(g)
+        for (const id of movedIds) {
+          if (memberSet.has(id)) continue
+          const p = livePos.get(id)
+          if (p && pointInLoops(fill, p.x, p.y)) { members.push(id); memberSet.add(id) }
+        }
       }
-      if (members.length === 0) continue
-      const fillLoops = computeGroupLoops(members, [])
-      const toAdd = candidates.filter(id => {
-        const p = livePos.get(id)!
-        return pointInLoops(fillLoops, p.x, p.y)
-      })
-      if (toAdd.length === 0) continue
-      const before = [...g.members]
-      const after = [...g.members, ...toAdd]
-      record({ type: 'members-grouping', id: g.id, from: before, to: after })
-      internalSetGroupingMembers(g.id, after)
+      commitMembers(g, reconcileMembers(members))
     }
   }
 
@@ -1157,7 +1206,9 @@ export function addInteraction(
     const grouping: Grouping = {
       id: crypto.randomUUID(),
       name: 'Unnamed',
-      members: [...selectedNodes],
+      // A group is a single region: drop any selected node that can't be
+      // reached without forming an exclave.
+      members: reconcileMembers([...selectedNodes]),
       vertices: [],
       color: DEFAULT_GROUP_COLOR,
       locked: false,
@@ -1170,14 +1221,12 @@ export function addInteraction(
   function modifyGroupMembers(id: string, mode: 'add' | 'remove'): void {
     const grouping = groupingById.get(id)
     if (!grouping || selectedNodes.size === 0) return
-    const before = [...grouping.members]
     const set = new Set(grouping.members)
     if (mode === 'add') for (const nid of selectedNodes) set.add(nid)
     else for (const nid of selectedNodes) set.delete(nid)
-    const after = [...set]
-    if (after.length === before.length && after.every(m => before.includes(m))) return
-    record({ type: 'members-grouping', id, from: before, to: after })
-    internalSetGroupingMembers(id, after)
+    // Reconcile either way: adding may pull in a node only reachable as an
+    // exclave, and removing a bridge member may strand others.
+    commitMembers(grouping, reconcileMembers([...set]))
     const g = groupingById.get(id)
     if (g) openGroupPanel(g) // re-render so the member count refreshes
   }
@@ -1596,6 +1645,9 @@ export function addInteraction(
   let panning = false
   let panStart = { x: 0, y: 0 }
   let panOrigin = { tx: 0, ty: 0 }
+  // Group whose background was pressed on; if the press turns out to be a click
+  // (not a pan-drag), that group is selected on mouseup.
+  let pendingGroupClick: string | null = null
 
   // ── Node drag ──────────────────────────────────────────────────────────────
   let activeNode: SVGGElement | null = null
@@ -1770,14 +1822,21 @@ export function addInteraction(
       boxEl.setAttribute('pointer-events', 'none')
       viewport.appendChild(boxEl)
     } else {
-      setFocusedNode(null)
-      hidePanel()
-      hideGroupPanel()
+      const vp = clientToViewport(me.clientX, me.clientY)
+      pendingGroupClick = groupAtPoint(vp.x, vp.y)
       panning = true
       panStart = { x: me.clientX, y: me.clientY }
       panOrigin = { tx: state.tx, ty: state.ty }
       svg.style.cursor = 'grabbing'
-      clearSelection()
+      // Pressing empty canvas deselects immediately; pressing inside a group
+      // preserves the current selection so the group panel (opened on a click,
+      // not a drag) can add or remove it.
+      if (!pendingGroupClick) {
+        setFocusedNode(null)
+        hidePanel()
+        hideGroupPanel()
+        clearSelection()
+      }
     }
   })
 
@@ -1841,9 +1900,10 @@ export function addInteraction(
           }
         }
         if (moveRecords.length > 0) record({ type: 'move-nodes', moves: moveRecords })
-        // After the move is recorded, unlocked groups absorb any node dropped
-        // inside them (recorded as its own undoable step, applied after the move).
-        absorbDraggedNodes(moved)
+        // After the move is recorded, groups touched by the drag absorb nodes
+        // dropped inside them and reconcile to a single region (each its own
+        // undoable step, applied after the move).
+        settleGroupsAfterDrag(moved)
       }
       const wasDrag = hasDragged
       activeNode.style.cursor = 'grab'
@@ -1919,6 +1979,14 @@ export function addInteraction(
     if (panning) {
       panning = false
       svg.style.cursor = addMode ? 'crosshair' : ''
+      const dx = e.clientX - panStart.x
+      const dy = e.clientY - panStart.y
+      const wasClick = Math.sqrt(dx * dx + dy * dy) <= DRAG_THRESHOLD
+      if (wasClick && pendingGroupClick) {
+        const g = groupingById.get(pendingGroupClick)
+        if (g) openGroupPanel(g)
+      }
+      pendingGroupClick = null
     }
   })
 
