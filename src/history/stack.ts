@@ -1,4 +1,4 @@
-import type { Node, Edge, NodeStatus, NodeClass } from '../types'
+import type { Node, Edge, NodeStatus, NodeClass, Grouping } from '../types'
 
 export type MoveRecord = {
   id: string
@@ -21,6 +21,12 @@ export type HistoryEntry =
   | { type: 'create-edge'; edge: Edge }
   | { type: 'delete-edge'; edge: Edge }
   | { type: 'settings-edge'; id: string; from: EdgeSettingsPatch; to: EdgeSettingsPatch }
+  | { type: 'create-grouping'; grouping: Grouping }
+  | { type: 'delete-grouping'; grouping: Grouping }
+  | { type: 'members-grouping'; id: string; from: string[]; to: string[] }
+  | { type: 'color-grouping'; id: string; from: string; to: string }
+  | { type: 'name-grouping'; id: string; from: string; to: string }
+  | { type: 'lock-grouping'; id: string; from: boolean; to: boolean }
 
 const MAX = 100
 const undoStack: HistoryEntry[] = []

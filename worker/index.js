@@ -102,6 +102,18 @@ async function initSchema(db) {
       rev INTEGER NOT NULL,
       PRIMARY KEY (entity_type, entity_id)
     )`),
+    // Euler-diagram groupings. `members` and `vertices` are JSON arrays; the
+    // visible shape is generated on the client from member positions, so
+    // `vertices` is a future shape hint and currently unused for rendering.
+    db.prepare(`CREATE TABLE IF NOT EXISTS groupings (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
+      members TEXT NOT NULL DEFAULT '[]',
+      vertices TEXT NOT NULL DEFAULT '[]',
+      color TEXT NOT NULL DEFAULT '#58a6ff',
+      locked INTEGER NOT NULL DEFAULT 0,
+      rev INTEGER NOT NULL DEFAULT 0
+    )`),
   ])
   try { await db.prepare('ALTER TABLE nodes ADD COLUMN description TEXT').run() } catch { /* exists */ }
   try { await db.prepare("ALTER TABLE nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'planned'").run() } catch { /* exists */ }
@@ -115,11 +127,15 @@ async function initSchema(db) {
   try { await db.prepare('ALTER TABLE edges ADD COLUMN mid_pos REAL').run() } catch { /* exists */ }
   try { await db.prepare('ALTER TABLE nodes ADD COLUMN rev INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
   try { await db.prepare('ALTER TABLE edges ADD COLUMN rev INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
+  // Grouping name and lock state, added after the groupings table shipped.
+  try { await db.prepare("ALTER TABLE groupings ADD COLUMN name TEXT NOT NULL DEFAULT ''").run() } catch { /* exists */ }
+  try { await db.prepare('ALTER TABLE groupings ADD COLUMN locked INTEGER NOT NULL DEFAULT 0').run() } catch { /* exists */ }
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('rev', 0)"),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_nodes_rev ON nodes(rev)'),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_edges_rev ON edges(rev)'),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_tombstones_rev ON tombstones(rev)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_groupings_rev ON groupings(rev)'),
   ])
 }
 
@@ -163,9 +179,10 @@ async function queryAuditPage(db, url, extraConditions = [], extraParams = []) {
 }
 
 async function runBackup(env) {
-  const [nr, er, ar] = await env.DB.batch([
+  const [nr, er, gr, ar] = await env.DB.batch([
     env.DB.prepare('SELECT * FROM nodes'),
     env.DB.prepare('SELECT * FROM edges'),
+    env.DB.prepare('SELECT * FROM groupings'),
     env.DB.prepare('SELECT * FROM audit_log ORDER BY timestamp DESC'),
   ])
   const timestamp = new Date().toISOString()
@@ -173,6 +190,7 @@ async function runBackup(env) {
     timestamp,
     nodes: nr.results,
     edges: er.results,
+    groupings: gr.results,
     audit_log: ar.results,
   })
   await env.BACKUPS.put(`backups/${timestamp}.json`, backup, {
@@ -225,9 +243,10 @@ export default {
 
     // ── Public: GET /graph ────────────────────────────────────────────────────
     if (request.method === 'GET' && url.pathname === '/graph') {
-      const [nr, er, mr] = await env.DB.batch([
+      const [nr, er, gr, mr] = await env.DB.batch([
         env.DB.prepare('SELECT * FROM nodes'),
         env.DB.prepare('SELECT * FROM edges'),
+        env.DB.prepare('SELECT * FROM groupings'),
         env.DB.prepare("SELECT value FROM meta WHERE key='rev'"),
       ])
       const rev = mr.results[0]?.value ?? 0
@@ -244,9 +263,9 @@ export default {
         ])
         // Seed rows keep rev 0, matching the counter, so a /changes?since=0 poll
         // correctly reports nothing new until the first real edit.
-        return json({ nodes: SEED_NODES, edges: SEED_EDGES, rev }, 200, corsHeaders)
+        return json({ nodes: SEED_NODES, edges: SEED_EDGES, groupings: [], rev }, 200, corsHeaders)
       }
-      return json({ nodes: nr.results, edges: er.results, rev }, 200, corsHeaders)
+      return json({ nodes: nr.results, edges: er.results, groupings: gr.results, rev }, 200, corsHeaders)
     }
 
     // ── Public: GET /changes?since=<rev> ──────────────────────────────────────
@@ -254,14 +273,15 @@ export default {
     // client's last known revision. since=0 (or omitted) returns the full graph.
     if (request.method === 'GET' && url.pathname === '/changes') {
       const since = Math.max(0, parseInt(url.searchParams.get('since') ?? '0', 10) || 0)
-      const [nr, er, tr, mr] = await env.DB.batch([
+      const [nr, er, gr, tr, mr] = await env.DB.batch([
         env.DB.prepare('SELECT * FROM nodes WHERE rev > ?').bind(since),
         env.DB.prepare('SELECT * FROM edges WHERE rev > ?').bind(since),
+        env.DB.prepare('SELECT * FROM groupings WHERE rev > ?').bind(since),
         env.DB.prepare('SELECT entity_type, entity_id, rev FROM tombstones WHERE rev > ?').bind(since),
         env.DB.prepare("SELECT value FROM meta WHERE key='rev'"),
       ])
       const rev = mr.results[0]?.value ?? 0
-      return json({ rev, nodes: nr.results, edges: er.results, deletions: tr.results }, 200, corsHeaders)
+      return json({ rev, nodes: nr.results, edges: er.results, groupings: gr.results, deletions: tr.results }, 200, corsHeaders)
     }
 
     // ── Auth middleware ───────────────────────────────────────────────────────
@@ -412,6 +432,61 @@ export default {
         tombstone(env.DB, 'edge', id),
         env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
           .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'delete_edge', 'edge', id, JSON.stringify({ before, after: null })),
+      ])
+      return json({ ok: true }, 200, corsHeaders)
+    }
+
+    // POST /groupings
+    if (request.method === 'POST' && path === '/groupings') {
+      const { id, name, members, vertices, color, locked } = await request.json()
+      const nm = name ?? ''
+      const m = JSON.stringify(Array.isArray(members) ? members : [])
+      const v = JSON.stringify(Array.isArray(vertices) ? vertices : [])
+      const c = color ?? '#58a6ff'
+      const lk = locked ? 1 : 0
+      const after = { id, name: nm, members: m, vertices: v, color: c, locked: lk }
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare(`INSERT OR REPLACE INTO groupings (id,name,members,vertices,color,locked,rev) VALUES (?,?,?,?,?,?,${REV})`)
+          .bind(id, nm, m, v, c, lk),
+        clearTombstone(env.DB, 'grouping', id),
+        env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+          .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'create_grouping', 'grouping', id, JSON.stringify({ before: null, after })),
+      ])
+      return json({ ok: true }, 201, corsHeaders)
+    }
+
+    // PATCH /groupings/:id
+    if (request.method === 'PATCH' && segments[0] === 'groupings' && segments[1]) {
+      const id = decodeURIComponent(segments[1])
+      const before = (await env.DB.prepare('SELECT * FROM groupings WHERE id=?').bind(id).first()) ?? null
+      const { name, members, vertices, color, locked } = await request.json()
+      // Absent keys keep their stored value; present keys overwrite it.
+      const nm = name !== undefined ? name : (before?.name ?? '')
+      const m = members !== undefined ? JSON.stringify(Array.isArray(members) ? members : []) : (before?.members ?? '[]')
+      const v = vertices !== undefined ? JSON.stringify(Array.isArray(vertices) ? vertices : []) : (before?.vertices ?? '[]')
+      const c = color !== undefined ? color : (before?.color ?? '#58a6ff')
+      const lk = locked !== undefined ? (locked ? 1 : 0) : (before?.locked ?? 0)
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare(`UPDATE groupings SET name=?, members=?, vertices=?, color=?, locked=?, rev=${REV} WHERE id=?`).bind(nm, m, v, c, lk, id),
+      ])
+      const after = (await env.DB.prepare('SELECT * FROM groupings WHERE id=?').bind(id).first()) ?? null
+      await env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+        .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'update_grouping', 'grouping', id, JSON.stringify({ before, after })).run()
+      return json({ ok: true }, 200, corsHeaders)
+    }
+
+    // DELETE /groupings/:id
+    if (request.method === 'DELETE' && segments[0] === 'groupings' && segments[1]) {
+      const id = decodeURIComponent(segments[1])
+      const before = (await env.DB.prepare('SELECT * FROM groupings WHERE id=?').bind(id).first()) ?? null
+      await env.DB.batch([
+        bump(env.DB),
+        env.DB.prepare('DELETE FROM groupings WHERE id=?').bind(id),
+        tombstone(env.DB, 'grouping', id),
+        env.DB.prepare('INSERT INTO audit_log (id,timestamp,username,action,entity_type,entity_id,diff) VALUES (?,?,?,?,?,?,?)')
+          .bind(crypto.randomUUID(), new Date().toISOString(), auth.username, 'delete_grouping', 'grouping', id, JSON.stringify({ before, after: null })),
       ])
       return json({ ok: true }, 200, corsHeaders)
     }

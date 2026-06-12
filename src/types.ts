@@ -29,9 +29,25 @@ export interface Edge {
   midPos?: number | null
 }
 
+// An Euler-diagram-style region enclosing a set of nodes. The visible shape is
+// generated entirely on the front end from the live positions of `members`;
+// `vertices` is a persisted future shape hint and is not used for rendering yet.
+export interface Grouping {
+  id: string
+  name: string
+  members: string[]
+  vertices: Array<{ x: number; y: number }>
+  color: string
+  // When locked, dragging a node into the region does not add it; the boundary
+  // adjusts to keep the node out instead. New members can only be added through
+  // the group menu.
+  locked: boolean
+}
+
 export interface Graph {
   nodes: Node[]
   edges: Edge[]
+  groupings: Grouping[]
 }
 
 // Incremental update pulled from GET /changes — only the rows that were written
@@ -40,8 +56,11 @@ export interface GraphChanges {
   rev: number
   nodes: Node[]
   edges: Edge[]
-  deletions: Array<{ entityType: 'node' | 'edge'; entityId: string; rev: number }>
+  groupings: Grouping[]
+  deletions: Array<{ entityType: 'node' | 'edge' | 'grouping'; entityId: string; rev: number }>
 }
+
+export type GroupingPatch = Partial<Pick<Grouping, 'name' | 'members' | 'vertices' | 'color' | 'locked'>>
 
 export interface GraphAPI {
   upsertNode: (node: Node) => Promise<void>
@@ -49,6 +68,9 @@ export interface GraphAPI {
   upsertEdge: (edge: Edge) => Promise<void>
   deleteEdge: (id: string) => Promise<void>
   patchEdge: (id: string, patch: Partial<Pick<Edge, 'routing' | 'style' | 'vanish' | 'midAxis' | 'midPos'>>) => Promise<void>
+  upsertGrouping: (grouping: Grouping) => Promise<void>
+  patchGrouping: (id: string, patch: GroupingPatch) => Promise<void>
+  deleteGrouping: (id: string) => Promise<void>
 }
 
 export interface AuditEntry {

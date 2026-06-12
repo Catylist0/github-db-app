@@ -21,6 +21,26 @@ export function nodeClassFill(cls?: string | null): string {
   return cls ? (NODE_CLASS_FILLS[cls] ?? NODE_DEFAULT_FILL) : NODE_DEFAULT_FILL
 }
 
+// Default colour for a freshly created grouping.
+export const DEFAULT_GROUP_COLOR = '#58a6ff'
+
+// Parse a #rrggbb (or #rgb) colour to its components, defaulting to the group
+// colour if the input is malformed.
+function parseHex(hex: string): { r: number; g: number; b: number } {
+  let h = hex.trim().replace(/^#/, '')
+  if (h.length === 3) h = h.split('').map(c => c + c).join('')
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) h = DEFAULT_GROUP_COLOR.slice(1)
+  return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) }
+}
+
+// A darkened version of `hex`, used as the translucent background fill of a
+// grouping region (the stroke uses the colour itself).
+export function darkenColor(hex: string, factor = 0.35): string {
+  const { r, g, b } = parseHex(hex)
+  const d = (c: number): number => Math.max(0, Math.round(c * factor))
+  return `rgb(${d(r)},${d(g)},${d(b)})`
+}
+
 export function svgEl<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementTagNameMap[K] {
   return document.createElementNS(NS, tag) as SVGElementTagNameMap[K]
 }

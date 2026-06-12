@@ -1,4 +1,4 @@
-import type { Graph, GraphAPI, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle, MidAxis } from '../types'
+import type { Graph, GraphAPI, GraphChanges, Node, Edge, EdgeRouting, EdgeStyle, MidAxis, Grouping } from '../types'
 import {
   svgEl,
   makeEdgePath,
@@ -11,6 +11,8 @@ import {
   displayPathFromSegments,
   nodeHalfHeight,
   setPulse,
+  darkenColor,
+  DEFAULT_GROUP_COLOR,
   NODE_HW,
   NODE_STROKE_WIDTH,
   SELECTED_NODE_STROKE_WIDTH,
@@ -20,10 +22,12 @@ import {
   type Seg,
 } from './utils'
 import { computeEdgeGeometry, edgeMidOverride } from './layout/route'
+import { computeGroupLoops, loopsToPath, pointInLoops, type GroupRect, type Pt } from './grouping'
 import { SpatialGrid } from './layout/grid'
 import { LayoutScheduler } from './layout/scheduler'
 import type { LayoutInput, LayoutResult, NodeSnap } from './layout/types'
 import { showPanel, hidePanel } from '../ui/panel'
+import { showGroupPanel, hideGroupPanel, isGroupPanelOpen } from '../ui/group-panel'
 import { record, popUndo, pushRedo, popRedo, pushUndo, clearHistory } from '../history/stack'
 import { openEdgeDialog, closeEdgeDialog, isEdgeDialogOpen } from '../ui/edge-dialog'
 import type { HistoryEntry, EdgeSettingsPatch } from '../history/stack'
@@ -99,6 +103,39 @@ export function addInteraction(
     livePos.set(n.id, { x: n.x, y: n.y, hh: nodeHalfHeight(n.label) })
   }
   for (const e of graph.edges) indexEdge(e)
+
+  // ── Grouping indexes ────────────────────────────────────────────────────────
+  // Groupings render as a layer behind edges and nodes; their outline is
+  // recomputed from live node positions whenever a member (or any nearby node)
+  // moves. groupsByNode lets a node move touch only the groups it can affect.
+  const groupingById = new Map<string, Grouping>()
+  const groupPathById = new Map<string, SVGPathElement>()
+  const groupNameById = new Map<string, SVGTextElement>()
+  const groupLoopsById = new Map<string, Pt[][]>()
+  const groupsByNode = new Map<string, Set<string>>()
+
+  const groupLayer = svgEl('g')
+  groupLayer.dataset.role = 'group-layer'
+  viewport.insertBefore(groupLayer, viewport.firstChild)
+
+  function indexGrouping(g: Grouping): void {
+    groupingById.set(g.id, g)
+    for (const nodeId of g.members) {
+      const set = groupsByNode.get(nodeId)
+      if (set) set.add(g.id)
+      else groupsByNode.set(nodeId, new Set([g.id]))
+    }
+  }
+
+  function unindexGrouping(g: Grouping): void {
+    groupingById.delete(g.id)
+    for (const nodeId of g.members) groupsByNode.get(nodeId)?.delete(g.id)
+  }
+
+  for (const g of graph.groupings ?? []) {
+    indexGrouping(g)
+    renderGrouping(g)
+  }
 
   function getNodePos(id: string): { x: number; y: number; hh: number } {
     const p = livePos.get(id)
@@ -626,6 +663,7 @@ export function addInteraction(
 
     if (authenticated) updateIconClusters()
     alignPanel.style.display = (authenticated && selectedNodes.size >= 2) ? 'flex' : 'none'
+    createGroupBtn.style.display = (authenticated && selectedNodes.size >= 1) ? 'flex' : 'none'
   }
 
   function selectNode(id: string): void {
@@ -675,6 +713,7 @@ export function addInteraction(
     invalidateGrid()
     if (persist) api.upsertNode(node).catch(console.error)
     requestLayout()
+    refreshAllGroups()
   }
 
   function internalRemoveNode(id: string, persist = true): void {
@@ -696,6 +735,7 @@ export function addInteraction(
     edgesByNode.delete(id)
     if (persist) api.deleteNode(id).catch(console.error)
     requestLayout()
+    refreshAllGroups()
   }
 
   function internalAddEdge(edge: Edge, persist = true): void {
@@ -739,6 +779,7 @@ export function addInteraction(
       g.dataset.cy = String(pos.y)
       g.setAttribute('transform', `translate(${pos.x - NODE_HW},${pos.y - p.hh})`)
       updateEdgesForNode(id)
+      updateGroupsForNodes([id])
     }
     if (persist) api.upsertNode(node).catch(console.error)
   }
@@ -758,6 +799,7 @@ export function addInteraction(
     p.hh = nodeHalfHeight(node.label)
     invalidateGrid()
     updateEdgesForNode(id)
+    updateGroupsForNodes([id])
     requestLayout()
   }
 
@@ -779,6 +821,245 @@ export function addInteraction(
       if (rectEl) rectEl.setAttribute('fill', nodeClassFill(node.nodeClass))
     }
     if (persist) api.upsertNode(node).catch(console.error)
+  }
+
+  // ── Groupings ───────────────────────────────────────────────────────────────
+
+  function groupRects(grouping: Grouping): { members: GroupRect[]; nonMembers: GroupRect[] } {
+    const memberSet = new Set(grouping.members)
+    const members: GroupRect[] = []
+    const nonMembers: GroupRect[] = []
+    for (const [id, p] of livePos) {
+      const rect = { x: p.x, y: p.y, hw: NODE_HW, hh: p.hh }
+      if (memberSet.has(id)) members.push(rect)
+      else nonMembers.push(rect)
+    }
+    return { members, nonMembers }
+  }
+
+  function styleGroupPath(path: SVGPathElement, color: string): void {
+    path.setAttribute('fill', darkenColor(color))
+    path.setAttribute('fill-opacity', '0.5')
+    path.setAttribute('fill-rule', 'evenodd')
+    path.setAttribute('stroke', color)
+    path.setAttribute('stroke-width', '3')
+    path.setAttribute('stroke-dasharray', '10 7')
+    path.setAttribute('stroke-linejoin', 'round')
+    // Only the dashed outline is interactive, so clicks inside the region still
+    // fall through to the canvas for panning and box-selection.
+    path.setAttribute('pointer-events', 'stroke')
+  }
+
+  function styleGroupName(text: SVGTextElement, color: string): void {
+    text.setAttribute('fill', color)
+    text.setAttribute('font-size', '14')
+    text.setAttribute('font-family', 'system-ui')
+    text.setAttribute('font-weight', '600')
+    text.setAttribute('text-anchor', 'start')
+    text.setAttribute('pointer-events', 'none')
+    text.style.userSelect = 'none'
+  }
+
+  // The left end of the highest (smallest-y) horizontal edge — where the group
+  // name sits, on top of and left-aligned to that edge.
+  function nameAnchor(loops: Pt[][]): Pt | null {
+    let topY = Infinity
+    let leftX = 0
+    let found = false
+    for (const loop of loops) {
+      for (let i = 0; i < loop.length; i++) {
+        const a = loop[i], b = loop[(i + 1) % loop.length]
+        if (Math.abs(a.y - b.y) > 1e-6) continue // horizontal edges only
+        const minX = Math.min(a.x, b.x)
+        if (a.y < topY - 1e-6) { topY = a.y; leftX = minX; found = true }
+        else if (Math.abs(a.y - topY) <= 1e-6 && minX < leftX) leftX = minX
+      }
+    }
+    return found ? { x: leftX, y: topY } : null
+  }
+
+  function renderGroupName(grouping: Grouping, loops: Pt[][]): void {
+    let text = groupNameById.get(grouping.id)
+    const anchor = nameAnchor(loops)
+    const label = grouping.name.trim()
+    if (!anchor || !label) {
+      text?.remove()
+      groupNameById.delete(grouping.id)
+      return
+    }
+    if (!text) {
+      text = svgEl('text')
+      groupLayer.appendChild(text)
+      groupNameById.set(grouping.id, text)
+    }
+    styleGroupName(text, grouping.color)
+    text.textContent = label
+    // Sit on top of the edge, inset past the rounded corner, left-aligned.
+    text.setAttribute('x', String(anchor.x + 14))
+    text.setAttribute('y', String(anchor.y - 6))
+  }
+
+  function renderGrouping(grouping: Grouping): void {
+    let path = groupPathById.get(grouping.id)
+    if (!path) {
+      path = svgEl('path')
+      path.dataset.groupId = grouping.id
+      path.style.cursor = 'pointer'
+      styleGroupPath(path, grouping.color)
+      path.addEventListener('mousedown', (e) => e.stopPropagation())
+      path.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const g = groupingById.get(grouping.id)
+        if (g) openGroupPanel(g)
+      })
+      groupLayer.appendChild(path)
+      groupPathById.set(grouping.id, path)
+    }
+    const { members, nonMembers } = groupRects(grouping)
+    const loops = computeGroupLoops(members, nonMembers)
+    groupLoopsById.set(grouping.id, loops)
+    path.setAttribute('d', loopsToPath(loops))
+    renderGroupName(grouping, loops)
+  }
+
+  // Bounding box of a group's members (live positions), or null when none exist.
+  function groupMemberBounds(g: Grouping): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, found = false
+    for (const mid of g.members) {
+      const mp = livePos.get(mid)
+      if (!mp) continue
+      minX = Math.min(minX, mp.x - NODE_HW); maxX = Math.max(maxX, mp.x + NODE_HW)
+      minY = Math.min(minY, mp.y - mp.hh);   maxY = Math.max(maxY, mp.y + mp.hh)
+      found = true
+    }
+    return found ? { minX, minY, maxX, maxY } : null
+  }
+
+  // Whether a moving node is close enough to a group to affect its outline (so a
+  // non-member group still recomputes as the node passes through its region).
+  function nodeNearGroup(nodeId: string, g: Grouping): boolean {
+    const p = livePos.get(nodeId)
+    if (!p) return false
+    const b = groupMemberBounds(g)
+    if (!b) return false
+    const M = 70 // ≈ memberPad + excludePad + a little slack
+    return p.x >= b.minX - M && p.x <= b.maxX + M && p.y >= b.minY - M && p.y <= b.maxY + M
+  }
+
+  function updateGroupsForNodes(ids: Iterable<string>): void {
+    const idList = [...ids]
+    const affected = new Set<string>()
+    for (const id of idList) {
+      const set = groupsByNode.get(id)
+      if (set) for (const gid of set) affected.add(gid)
+    }
+    // Non-member groups whose region a moving node has entered must also
+    // recompute, so a locked group visibly adjusts to keep the node out (and an
+    // unlocked one carves around it until the node is dropped and absorbed).
+    for (const g of groupingById.values()) {
+      if (affected.has(g.id)) continue
+      for (const id of idList) {
+        if (nodeNearGroup(id, g)) { affected.add(g.id); break }
+      }
+    }
+    for (const gid of affected) {
+      const g = groupingById.get(gid)
+      if (g) renderGrouping(g)
+    }
+  }
+
+  // On drop, an unlocked group absorbs any dragged node whose centre landed in
+  // its area. Containment is tested against the members-only region (no
+  // exclusions) so a node sitting in the boundary's avoidance notch still counts.
+  function absorbDraggedNodes(ids: string[]): void {
+    for (const g of groupingById.values()) {
+      if (g.locked) continue
+      const memberSet = new Set(g.members)
+      const candidates = ids.filter(id => !memberSet.has(id) && livePos.has(id))
+      if (candidates.length === 0) continue
+      // Cheap reject: skip the outline pass unless a candidate is near the group.
+      if (!candidates.some(id => nodeNearGroup(id, g))) continue
+      const members: GroupRect[] = []
+      for (const mid of g.members) {
+        const mp = livePos.get(mid)
+        if (mp) members.push({ x: mp.x, y: mp.y, hw: NODE_HW, hh: mp.hh })
+      }
+      if (members.length === 0) continue
+      const fillLoops = computeGroupLoops(members, [])
+      const toAdd = candidates.filter(id => {
+        const p = livePos.get(id)!
+        return pointInLoops(fillLoops, p.x, p.y)
+      })
+      if (toAdd.length === 0) continue
+      const before = [...g.members]
+      const after = [...g.members, ...toAdd]
+      record({ type: 'members-grouping', id: g.id, from: before, to: after })
+      internalSetGroupingMembers(g.id, after)
+    }
+  }
+
+  // A node being added or removed changes the non-member set every group is
+  // carved against, so every outline is recomputed.
+  function refreshAllGroups(): void {
+    for (const g of groupingById.values()) renderGrouping(g)
+  }
+
+  function internalAddGrouping(grouping: Grouping, persist = true): void {
+    if (groupingById.has(grouping.id)) return
+    graph.groupings.push(grouping)
+    indexGrouping(grouping)
+    renderGrouping(grouping)
+    if (persist) api.upsertGrouping(grouping).catch(console.error)
+  }
+
+  function internalRemoveGrouping(id: string, persist = true): void {
+    const idx = graph.groupings.findIndex(g => g.id === id)
+    if (idx < 0) return
+    const [removed] = graph.groupings.splice(idx, 1)
+    unindexGrouping(removed)
+    groupPathById.get(id)?.remove()
+    groupPathById.delete(id)
+    groupNameById.get(id)?.remove()
+    groupNameById.delete(id)
+    groupLoopsById.delete(id)
+    if (persist) api.deleteGrouping(id).catch(console.error)
+  }
+
+  function internalSetGroupingMembers(id: string, members: string[], persist = true): void {
+    const grouping = groupingById.get(id)
+    if (!grouping) return
+    unindexGrouping(grouping)
+    grouping.members = [...members]
+    indexGrouping(grouping)
+    renderGrouping(grouping)
+    if (persist) api.patchGrouping(id, { members: grouping.members }).catch(console.error)
+  }
+
+  function internalSetGroupingColor(id: string, color: string, persist = true): void {
+    const grouping = groupingById.get(id)
+    if (!grouping) return
+    grouping.color = color
+    const path = groupPathById.get(id)
+    if (path) styleGroupPath(path, color)
+    groupNameById.get(id)?.setAttribute('fill', color)
+    if (persist) api.patchGrouping(id, { color }).catch(console.error)
+  }
+
+  function internalSetGroupingName(id: string, name: string, persist = true): void {
+    const grouping = groupingById.get(id)
+    if (!grouping) return
+    grouping.name = name
+    renderGroupName(grouping, groupLoopsById.get(id) ?? [])
+    if (persist) api.patchGrouping(id, { name }).catch(console.error)
+  }
+
+  // Locking changes no geometry — a group always excludes non-members — only
+  // whether a node dragged into the region is absorbed on drop.
+  function internalSetGroupingLocked(id: string, locked: boolean, persist = true): void {
+    const grouping = groupingById.get(id)
+    if (!grouping) return
+    grouping.locked = locked
+    if (persist) api.patchGrouping(id, { locked }).catch(console.error)
   }
 
   // ── Edge toggle ────────────────────────────────────────────────────────────
@@ -826,6 +1107,7 @@ export function addInteraction(
     const id = node.id
     setFocusedNode(id)
     closeEdgeDialog()
+    hideGroupPanel()
     const isReadonly = !authenticated
     showPanel(
       node,
@@ -857,19 +1139,103 @@ export function addInteraction(
     )
   }
 
+  // ── Grouping actions ────────────────────────────────────────────────────────
+
+  function cloneGrouping(g: Grouping): Grouping {
+    return {
+      id: g.id,
+      name: g.name,
+      members: [...g.members],
+      vertices: g.vertices.map(v => ({ ...v })),
+      color: g.color,
+      locked: g.locked,
+    }
+  }
+
+  function createGrouping(): void {
+    if (!authenticated || selectedNodes.size === 0) return
+    const grouping: Grouping = {
+      id: crypto.randomUUID(),
+      name: 'Unnamed',
+      members: [...selectedNodes],
+      vertices: [],
+      color: DEFAULT_GROUP_COLOR,
+      locked: false,
+    }
+    internalAddGrouping(grouping)
+    record({ type: 'create-grouping', grouping: cloneGrouping(grouping) })
+    openGroupPanel(grouping)
+  }
+
+  function modifyGroupMembers(id: string, mode: 'add' | 'remove'): void {
+    const grouping = groupingById.get(id)
+    if (!grouping || selectedNodes.size === 0) return
+    const before = [...grouping.members]
+    const set = new Set(grouping.members)
+    if (mode === 'add') for (const nid of selectedNodes) set.add(nid)
+    else for (const nid of selectedNodes) set.delete(nid)
+    const after = [...set]
+    if (after.length === before.length && after.every(m => before.includes(m))) return
+    record({ type: 'members-grouping', id, from: before, to: after })
+    internalSetGroupingMembers(id, after)
+    const g = groupingById.get(id)
+    if (g) openGroupPanel(g) // re-render so the member count refreshes
+  }
+
+  function openGroupPanel(grouping: Grouping): void {
+    hidePanel()
+    closeEdgeDialog()
+    showGroupPanel(grouping, {
+      getSelectionCount: () => selectedNodes.size,
+      onAddSelection: () => modifyGroupMembers(grouping.id, 'add'),
+      onRemoveSelection: () => modifyGroupMembers(grouping.id, 'remove'),
+      onNameCommit: (from, to) => {
+        if (from === to) return
+        record({ type: 'name-grouping', id: grouping.id, from, to })
+        internalSetGroupingName(grouping.id, to)
+      },
+      onToggleLock: (next) => {
+        const cur = groupingById.get(grouping.id)
+        if (!cur || cur.locked === next) return
+        record({ type: 'lock-grouping', id: grouping.id, from: cur.locked, to: next })
+        internalSetGroupingLocked(grouping.id, next)
+      },
+      onColorPreview: (color) => internalSetGroupingColor(grouping.id, color, false),
+      onColorCommit: (from, to) => {
+        if (from === to) return
+        record({ type: 'color-grouping', id: grouping.id, from, to })
+        internalSetGroupingColor(grouping.id, to)
+      },
+      onDelete: () => {
+        record({ type: 'delete-grouping', grouping: cloneGrouping(grouping) })
+        hideGroupPanel()
+        internalRemoveGrouping(grouping.id)
+      },
+      onClose: () => {},
+    }, !authenticated)
+  }
+
   // ── Add-node mode ─────────────────────────────────────────────────────────
 
   let addMode = false
   let addModeDocListener: ((e: MouseEvent) => void) | null = null
 
+  // Bottom-left button stack. column-reverse keeps "Create node" pinned to the
+  // bottom; the grouping button and the alignment buttons stack above it.
+  const bottomStack = document.createElement('div')
+  bottomStack.style.cssText =
+    'position:fixed;bottom:1rem;left:1rem;display:flex;flex-direction:column-reverse;' +
+    'align-items:flex-start;gap:.375rem;z-index:100;'
+  document.body.appendChild(bottomStack)
+
   const addBtn = document.createElement('button')
   addBtn.textContent = 'Create node'
   addBtn.style.cssText =
-    'position:fixed;bottom:1rem;left:1rem;height:1.875rem;padding:0 .75rem;' +
+    'height:1.875rem;padding:0 .75rem;' +
     'background:#0d1117;border:1px solid #30363d;' +
     'color:#8b949e;font-size:.8rem;font-family:system-ui;letter-spacing:.02em;' +
     'cursor:pointer;display:none;align-items:center;justify-content:center;'
-  document.body.appendChild(addBtn)
+  bottomStack.appendChild(addBtn)
 
   function setAddMode(active: boolean): void {
     addMode = active
@@ -895,10 +1261,15 @@ export function addInteraction(
 
   // ── Alignment panel ───────────────────────────────────────────────────────
 
+  // Create Grouping — shown above the stack whenever ≥1 node is selected.
+  const createGroupBtn = makeAlignBtn('Create grouping', () => createGrouping())
+  createGroupBtn.style.display = 'none'
+  bottomStack.appendChild(createGroupBtn)
+
   const alignPanel = document.createElement('div')
   alignPanel.style.cssText =
-    'position:fixed;bottom:3.5rem;left:1rem;display:none;flex-direction:column;gap:.375rem;z-index:100;'
-  document.body.appendChild(alignPanel)
+    'display:none;flex-direction:column;gap:.375rem;'
+  bottomStack.appendChild(alignPanel)
 
   const alignBtnBase =
     'height:1.875rem;padding:0 .75rem;' +
@@ -1011,6 +1382,7 @@ export function addInteraction(
   function applyEntry(entry: HistoryEntry, dir: 'undo' | 'redo'): void {
     setFocusedNode(null)
     hidePanel()
+    hideGroupPanel()
     clearSelection()
     switch (entry.type) {
       case 'create-node':
@@ -1054,6 +1426,26 @@ export function addInteraction(
         if (edge) setEdgeSettings(edge, dir === 'undo' ? entry.from : entry.to)
         break
       }
+      case 'create-grouping':
+        if (dir === 'undo') internalRemoveGrouping(entry.grouping.id)
+        else internalAddGrouping(cloneGrouping(entry.grouping))
+        break
+      case 'delete-grouping':
+        if (dir === 'undo') internalAddGrouping(cloneGrouping(entry.grouping))
+        else internalRemoveGrouping(entry.grouping.id)
+        break
+      case 'members-grouping':
+        internalSetGroupingMembers(entry.id, dir === 'undo' ? entry.from : entry.to)
+        break
+      case 'color-grouping':
+        internalSetGroupingColor(entry.id, dir === 'undo' ? entry.from : entry.to)
+        break
+      case 'name-grouping':
+        internalSetGroupingName(entry.id, dir === 'undo' ? entry.from : entry.to)
+        break
+      case 'lock-grouping':
+        internalSetGroupingLocked(entry.id, dir === 'undo' ? entry.from : entry.to)
+        break
     }
     refreshHighlights()
   }
@@ -1090,11 +1482,17 @@ export function addInteraction(
     // pan, a box select, a pending click-to-add, or an open edge dialog.
     if (activeNode || midDrag || panning || boxSelecting) return false
     if (pendingAddPos || pendingCtrlAddPos || isEdgeDialogOpen()) return false
-    if (changes.nodes.length === 0 && changes.edges.length === 0 && changes.deletions.length === 0) return true
+    if (changes.nodes.length === 0 && changes.edges.length === 0 &&
+        changes.groupings.length === 0 && changes.deletions.length === 0) return true
 
     for (const d of changes.deletions) {
       if (d.entityType === 'node') internalRemoveNode(d.entityId, false)
-      else internalRemoveEdge(d.entityId, false)
+      else if (d.entityType === 'grouping') {
+        const existed = groupingById.has(d.entityId)
+        internalRemoveGrouping(d.entityId, false)
+        if (existed && isGroupPanelOpen()) hideGroupPanel()
+        continue
+      } else internalRemoveEdge(d.entityId, false)
       selectedNodes.delete(d.entityId)
       if (_focusedNodeId === d.entityId) { setFocusedNode(null); hidePanel() }
     }
@@ -1125,6 +1523,19 @@ export function addInteraction(
       if (Object.keys(patch).length > 0) setEdgeSettings(existing, patch, false)
     }
 
+    for (const grouping of changes.groupings) {
+      const existing = groupingById.get(grouping.id)
+      if (!existing) { internalAddGrouping(grouping, false); continue }
+      const sameMembers =
+        existing.members.length === grouping.members.length &&
+        existing.members.every(m => grouping.members.includes(m))
+      if (!sameMembers) internalSetGroupingMembers(grouping.id, grouping.members, false)
+      if (existing.color !== grouping.color) internalSetGroupingColor(grouping.id, grouping.color, false)
+      if (existing.name !== grouping.name) internalSetGroupingName(grouping.id, grouping.name, false)
+      if (existing.locked !== grouping.locked) internalSetGroupingLocked(grouping.id, grouping.locked, false)
+      existing.vertices = grouping.vertices
+    }
+
     refreshHighlights()
     requestLayout()
     return true
@@ -1141,7 +1552,9 @@ export function addInteraction(
       setFocusedNode(null)
       clearIconClusters()
       closeEdgeDialog()
+      hideGroupPanel()
       alignPanel.style.display = 'none'
+      createGroupBtn.style.display = 'none'
     }
     hidePanel()
   }
@@ -1292,11 +1705,13 @@ export function addInteraction(
           }
           invalidateGrid()
           for (const id of multiDragOrigins.keys()) updateEdgesForNode(id)
+          updateGroupsForNodes(multiDragOrigins.keys())
         } else {
           const id = activeNode.dataset.nodeId!
           moveDraggedNode(id, singleDragOrigin.cx, singleDragOrigin.cy, dx, dy)
           invalidateGrid()
           updateEdgesForNode(id)
+          updateGroupsForNodes([id])
         }
         maybeRequestDragLayout()
       }
@@ -1357,6 +1772,7 @@ export function addInteraction(
     } else {
       setFocusedNode(null)
       hidePanel()
+      hideGroupPanel()
       panning = true
       panStart = { x: me.clientX, y: me.clientY }
       panOrigin = { tx: state.tx, ty: state.ty }
@@ -1425,6 +1841,9 @@ export function addInteraction(
           }
         }
         if (moveRecords.length > 0) record({ type: 'move-nodes', moves: moveRecords })
+        // After the move is recorded, unlocked groups absorb any node dropped
+        // inside them (recorded as its own undoable step, applied after the move).
+        absorbDraggedNodes(moved)
       }
       const wasDrag = hasDragged
       activeNode.style.cursor = 'grab'

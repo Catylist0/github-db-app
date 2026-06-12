@@ -1,5 +1,5 @@
 import { storeToken, getToken, login, logout, isAuthenticated } from './auth/github'
-import { loadGraph, fetchChanges, upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge, onUnauthorized } from './storage/api'
+import { loadGraph, fetchChanges, upsertNode, deleteNode, upsertEdge, deleteEdge, patchEdge, upsertGrouping, patchGrouping, deleteGrouping, onUnauthorized } from './storage/api'
 import { renderGraph } from './graph/renderer'
 import { hidePanel } from './ui/panel'
 import { hideSearchPanel, toggleSearchPanel, isSearchPanelOpen } from './ui/search'
@@ -225,6 +225,9 @@ const graphApi = {
   upsertEdge: wrapWrite(upsertEdge),
   deleteEdge: wrapWrite(deleteEdge),
   patchEdge: wrapWrite(patchEdge),
+  upsertGrouping: wrapWrite(upsertGrouping),
+  patchGrouping: wrapWrite(patchGrouping),
+  deleteGrouping: wrapWrite(deleteGrouping),
 }
 
 async function pollChanges(): Promise<void> {
