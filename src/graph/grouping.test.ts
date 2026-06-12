@@ -40,21 +40,43 @@ describe('computeGroupLoops', () => {
     expect(pointInLoops(loops, 1000, 1000)).toBe(false)
   })
 
-  it('encloses all members of a multi-node selection', () => {
+  it('uses a simple padded bounding box for spread-out members (no corridor arms)', () => {
     const members = [node(0, 0), node(300, 0), node(150, 200)]
-    const loops = computeGroupLoops(members, [])
-    for (const m of members) expect(pointInLoops(loops, m.x, m.y)).toBe(true)
+    const shape = computeGroupShape(members, [])
+    expect(shape.excluded).toEqual([])
+    for (const m of members) expect(pointInLoops(shape.loops, m.x, m.y)).toBe(true)
+    // One outer loop with at most eight corners (bbox with optional stair removal).
+    expect(shape.loops.length).toBe(1)
+    expect(shape.loops[0].length).toBeLessThanOrEqual(8)
+    // The midpoint of the bbox is inside — no thin bridge required.
+    expect(pointInLoops(shape.loops, 150, 100)).toBe(true)
+  })
+
+  it('encloses far-apart members in one padded rectangle', () => {
+    const loops = computeGroupLoops([node(0, 0), node(360, 0)], [])
+    expect(pointInLoops(loops, 0, 0)).toBe(true)
+    expect(pointInLoops(loops, 360, 0)).toBe(true)
+    expect(pointInLoops(loops, 180, 0)).toBe(true)
+    expect(loops[0].length).toBe(4)
   })
 
   it('excludes a non-member node sitting between members', () => {
-    // Two members with an intruding non-member centred between them.
     const members = [node(0, 0), node(400, 0)]
     const intruder = node(200, 0)
     const loops = computeGroupLoops(members, [intruder])
     expect(pointInLoops(loops, 0, 0)).toBe(true)
     expect(pointInLoops(loops, 400, 0)).toBe(true)
-    // The intruder's centre is carved out of the region.
     expect(pointInLoops(loops, 200, 0)).toBe(false)
+  })
+
+  it('drops a member as an exclave when a non-member severs the region', () => {
+    const members = [node(0, 0), node(90, 0), node(600, 0)]
+    const wall: GroupRect = { x: 320, y: 0, hw: 30, hh: 220 }
+    const shape = computeGroupShape(members, [wall])
+    expect(shape.excluded).toEqual([2])
+    expect(pointInLoops(shape.loops, 0, 0)).toBe(true)
+    expect(pointInLoops(shape.loops, 90, 0)).toBe(true)
+    expect(pointInLoops(shape.loops, 600, 0)).toBe(false)
   })
 
   it('keeps a member enclosed even if a non-member overlaps it', () => {

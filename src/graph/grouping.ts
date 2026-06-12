@@ -2,10 +2,11 @@
 // nodes (and the rectangles of every other, non-member node), this computes an
 // Euler-diagram-style rectilinear outline.
 //
-// A group is a *single* region: members are bridged together with corridors
-// along a minimum spanning tree, so the padded member blobs merge into one
-// shape rather than scattering into separate exclave boxes. Non-member nodes are
-// carved back out, which can sever a corridor — when that disconnects a member
+// The region is the simplest reasonable axis-aligned shape: a padded bounding
+// box around all members, with rectangular cut-outs around non-members. There
+// are no thin corridor arms to individual nodes — extra interior space is
+// acceptable; jagged or spindly boundaries are not. Non-member nodes are
+// carved back out, which can split the region — when that disconnects a member
 // from the main body, the member is reported as an exclave so the caller can
 // drop it from the group entirely (a group can never have an exclave).
 //
@@ -24,12 +25,10 @@ export interface GroupRect {
 export interface GroupOutlineOptions {
   memberPad?: number // margin grown around each member before the boundary sits
   excludePad?: number // keep-out margin around each non-member node
-  cell?: number // sampling resolution (smaller = smoother, slower)
   corner?: number // corner radius
-  corridorHalf?: number // half-width of the bridges that connect members
 }
 
-const DEFAULTS = { memberPad: 26, excludePad: 16, cell: 10, corner: 14, corridorHalf: 16 }
+const DEFAULTS = { memberPad: 26, excludePad: 16, corner: 14 }
 
 export type Pt = { x: number; y: number }
 
@@ -92,48 +91,51 @@ export function computeGroupShape(
   if (members.length === 0) return { loops: [], excluded: [] }
   const memberPad = options.memberPad ?? DEFAULTS.memberPad
   const excludePad = options.excludePad ?? DEFAULTS.excludePad
-  const cell = options.cell ?? DEFAULTS.cell
-  const corridorHalf = options.corridorHalf ?? DEFAULTS.corridorHalf
 
-  // Sampling region: the padded member bounding box, plus a one-cell apron so
-  // the boundary always has an "outside" ring of cells to close against.
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  // Outer envelope: one padded axis-aligned box around every member.
+  let bboxMinX = Infinity, bboxMinY = Infinity, bboxMaxX = -Infinity, bboxMaxY = -Infinity
   for (const m of members) {
-    minX = Math.min(minX, m.x - m.hw - memberPad)
-    minY = Math.min(minY, m.y - m.hh - memberPad)
-    maxX = Math.max(maxX, m.x + m.hw + memberPad)
-    maxY = Math.max(maxY, m.y + m.hh + memberPad)
+    bboxMinX = Math.min(bboxMinX, m.x - m.hw - memberPad)
+    bboxMinY = Math.min(bboxMinY, m.y - m.hh - memberPad)
+    bboxMaxX = Math.max(bboxMaxX, m.x + m.hw + memberPad)
+    bboxMaxY = Math.max(bboxMaxY, m.y + m.hh + memberPad)
   }
-  const x0 = minX - cell
-  const y0 = minY - cell
-  const cols = Math.ceil((maxX + cell - x0) / cell) + 1
-  const rows = Math.ceil((maxY + cell - y0) / cell) + 1
 
-  // Corridors bridging members into one region, routed along a minimum spanning
-  // tree (shortest total length) as L-shaped (horizontal-then-vertical) bands.
-  const corridors = corridorSegments(members)
+  // Build a coordinate-compressed grid: cell boundaries only at meaningful
+  // x/y values (bbox edges, member/non-member rect edges) so the traced outline
+  // has as few vertices as the geometry allows.
+  const xs = uniqueSorted([
+    bboxMinX, bboxMaxX,
+    ...members.flatMap(m => [m.x - m.hw, m.x + m.hw, m.x - m.hw - memberPad, m.x + m.hw + memberPad]),
+    ...nonMembers.flatMap(n => [n.x - n.hw - excludePad, n.x + n.hw + excludePad]),
+  ])
+  const ys = uniqueSorted([
+    bboxMinY, bboxMaxY,
+    ...members.flatMap(m => [m.y - m.hh, m.y + m.hh, m.y - m.hh - memberPad, m.y + m.hh + memberPad]),
+    ...nonMembers.flatMap(n => [n.y - n.hh - excludePad, n.y + n.hh + excludePad]),
+  ])
+
+  const cols = xs.length - 1
+  const rows = ys.length - 1
+  if (cols <= 0 || rows <= 0) return { loops: [], excluded: [] }
 
   const inRect = (px: number, py: number, r: GroupRect, pad: number): boolean =>
     Math.abs(px - r.x) <= r.hw + pad && Math.abs(py - r.y) <= r.hh + pad
 
-  // A cell (sampled at its centre) is inside when it is within memberPad of a
-  // member or on a connecting corridor, and not within excludePad of any
-  // non-member — except that a member's own core rectangle is always kept, so
-  // members are never carved out by a non-member that sits on top of them.
+  const inBbox = (px: number, py: number): boolean =>
+    px >= bboxMinX && px <= bboxMaxX && py >= bboxMinY && py <= bboxMaxY
+
+  // A cell (sampled at its centre) is inside when it lies in the padded bbox
+  // and is not within excludePad of any non-member — except that a member's own
+  // core rectangle is always kept, so members are never carved out by a
+  // non-member that sits on top of them.
   const inside = (i: number, j: number): boolean => {
-    const px = x0 + (i + 0.5) * cell
-    const py = y0 + (j + 0.5) * cell
-    let cover = false
+    const px = (xs[i] + xs[i + 1]) / 2
+    const py = (ys[j] + ys[j + 1]) / 2
     for (const m of members) {
       if (inRect(px, py, m, 0)) return true // member core — always in
-      if (inRect(px, py, m, memberPad)) { cover = true; break }
     }
-    if (!cover) {
-      for (const s of corridors) {
-        if (pointSegDist(px, py, s.x1, s.y1, s.x2, s.y2) <= corridorHalf) { cover = true; break }
-      }
-    }
-    if (!cover) return false
+    if (!inBbox(px, py)) return false
     for (const n of nonMembers) {
       if (inRect(px, py, n, excludePad)) return false
     }
@@ -148,7 +150,7 @@ export function computeGroupShape(
   // Split the inside cells into connected components, keep the one holding the
   // most members (the main region), and report every member outside it as an
   // exclave. Non-main cells are cleared so only the single region is traced.
-  const { excluded } = keepMainComponent(grid, members, cols, rows, x0, y0, cell)
+  const { excluded } = keepMainComponent(grid, members, cols, rows, xs, ys)
 
   const at = (i: number, j: number): boolean =>
     i >= 0 && j >= 0 && i < cols && j < rows && grid[j * cols + i]
@@ -157,7 +159,7 @@ export function computeGroupShape(
   // winding (screen coords: x→right, y→down). A unit cell border is a boundary
   // exactly when its outward neighbour is outside; only the inside cell emits
   // it, so the whole boundary is consistently wound (outer loops clockwise,
-  // holes counter-clockwise). Corners are integer grid points (i, j).
+  // holes counter-clockwise). Corners sit on the compressed grid (xs, ys).
   const key = (i: number, j: number): number => j * (cols + 1) + i
   const out = new Map<number, Array<{ i: number; j: number }>>()
   const addEdge = (ai: number, aj: number, bi: number, bj: number): void => {
@@ -198,53 +200,18 @@ export function computeGroupShape(
         prev = cur
         cur = next
       }
-      loops.push(loop.map(p => ({ x: x0 + p.i * cell, y: y0 + p.j * cell })))
+      loops.push(loop.map(p => ({ x: xs[p.i], y: ys[p.j] })))
     }
   }
 
   return {
-    loops: loops.map(simplifyCollinear).filter(loop => loop.length >= 3),
+    loops: loops.map(simplifyRectilinear).filter(loop => loop.length >= 3),
     excluded,
   }
 }
 
-// Minimum spanning tree over member centres (Prim's), returned as L-shaped
-// corridor segments (horizontal leg then vertical leg) connecting each edge.
-function corridorSegments(members: GroupRect[]): Array<{ x1: number; y1: number; x2: number; y2: number }> {
-  const n = members.length
-  const segs: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
-  if (n <= 1) return segs
-  const inTree = new Array(n).fill(false)
-  const dist = new Array(n).fill(Infinity)
-  const parent = new Array(n).fill(-1)
-  dist[0] = 0
-  for (let it = 0; it < n; it++) {
-    let u = -1, best = Infinity
-    for (let v = 0; v < n; v++) if (!inTree[v] && dist[v] < best) { best = dist[v]; u = v }
-    if (u === -1) break
-    inTree[u] = true
-    if (parent[u] >= 0) {
-      const a = members[parent[u]], b = members[u]
-      segs.push({ x1: a.x, y1: a.y, x2: b.x, y2: a.y }) // horizontal leg
-      segs.push({ x1: b.x, y1: a.y, x2: b.x, y2: b.y }) // vertical leg
-    }
-    for (let v = 0; v < n; v++) {
-      if (inTree[v]) continue
-      const dx = members[u].x - members[v].x, dy = members[u].y - members[v].y
-      const d = dx * dx + dy * dy
-      if (d < dist[v]) { dist[v] = d; parent[v] = u }
-    }
-  }
-  return segs
-}
-
-function pointSegDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
-  const dx = x2 - x1, dy = y2 - y1
-  const l2 = dx * dx + dy * dy
-  if (l2 === 0) return Math.hypot(px - x1, py - y1)
-  let t = ((px - x1) * dx + (py - y1) * dy) / l2
-  t = Math.max(0, Math.min(1, t))
-  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+function uniqueSorted(values: number[]): number[] {
+  return [...new Set(values.map(v => round(v)))].sort((a, b) => a - b)
 }
 
 // Flood-fill the inside grid into connected components (4-connectivity), keep
@@ -255,9 +222,8 @@ function keepMainComponent(
   members: GroupRect[],
   cols: number,
   rows: number,
-  x0: number,
-  y0: number,
-  cell: number,
+  xs: number[],
+  ys: number[],
 ): { excluded: number[] } {
   const label = new Int32Array(cols * rows).fill(-1)
   const cellCount: number[] = []
@@ -286,10 +252,9 @@ function keepMainComponent(
   }
   if (nComp <= 1) return { excluded: [] }
 
-  const clampIdx = (v: number, hi: number): number => Math.max(0, Math.min(hi, v))
   const memberComp = members.map(m => {
-    const i = clampIdx(Math.floor((m.x - x0) / cell), cols - 1)
-    const j = clampIdx(Math.floor((m.y - y0) / cell), rows - 1)
+    const i = cellIndex(xs, m.x, cols)
+    const j = cellIndex(ys, m.y, rows)
     return label[j * cols + i]
   })
 
@@ -305,6 +270,14 @@ function keepMainComponent(
   for (let m = 0; m < members.length; m++) if (memberComp[m] !== main) excluded.push(m)
   for (let s = 0; s < grid.length; s++) if (label[s] !== main) grid[s] = false
   return { excluded }
+}
+
+function cellIndex(breaks: number[], v: number, count: number): number {
+  for (let i = 0; i < count; i++) {
+    if (v >= breaks[i] && v <= breaks[i + 1]) return i
+  }
+  if (v < breaks[0]) return 0
+  return count - 1
 }
 
 // Choose the outgoing edge that turns most clockwise relative to the incoming
@@ -334,6 +307,17 @@ function pickClockwise(
   return bestIdx
 }
 
+// Drop collinear interior points and collapse one-cell stair-steps so each
+// retained vertex is a real corner.
+function simplifyRectilinear(loop: Pt[]): Pt[] {
+  let cur = simplifyCollinear(loop)
+  for (;;) {
+    const next = collapseStairs(cur)
+    if (next.length === cur.length) return next
+    cur = simplifyCollinear(next)
+  }
+}
+
 // Drop collinear interior points so each retained vertex is a real corner.
 function simplifyCollinear(loop: Pt[]): Pt[] {
   const n = loop.length
@@ -346,6 +330,27 @@ function simplifyCollinear(loop: Pt[]): Pt[] {
     const ax = cur.x - prev.x, ay = cur.y - prev.y
     const bx = next.x - cur.x, by = next.y - cur.y
     if (ax * by - ay * bx !== 0) out.push(cur) // turn here
+  }
+  return out.length >= 3 ? out : loop
+}
+
+// Remove a rectilinear stair-step: A→B→C→D where AB ∥ CD and BC is the short
+// perpendicular leg between two parallel runs on different lines.
+function collapseStairs(loop: Pt[]): Pt[] {
+  const n = loop.length
+  if (n < 4) return loop
+  const out: Pt[] = []
+  for (let i = 0; i < n; i++) {
+    const a = loop[(i - 1 + n) % n]
+    const b = loop[i]
+    const c = loop[(i + 1) % n]
+    const d = loop[(i + 2) % n]
+    const abH = a.y === b.y, abV = a.x === b.x
+    const bcH = b.y === c.y, bcV = b.x === c.x
+    const cdH = c.y === d.y, cdV = c.x === c.x
+    if (abH && bcV && cdH && abH === cdH && a.y !== c.y) continue // drop B
+    if (abV && bcH && cdV && abV === cdV && a.x !== c.x) continue // drop C
+    out.push(b)
   }
   return out.length >= 3 ? out : loop
 }
